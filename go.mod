@@ -1,4 +1,4 @@
-module github.com/ironicbadger/silo-plugin-tailscale
+module github.com/Silo-Community/silo-plugin-tailscale
 
 go 1.26.7
 

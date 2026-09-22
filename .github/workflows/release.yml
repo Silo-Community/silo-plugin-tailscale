@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            latest=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+            if [ -z "$latest" ]; then
+              version=$(jq -r '.version' manifest.json)
+            else
+              base="${latest#v}"
+              IFS='.' read -r major minor patch <<< "$base"
+              version="${major}.${minor}.$((patch + 1))"
+            fi
+            tag="v${version}"
+            git tag "$tag"
+            git push origin "refs/tags/${tag}"
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release archives
+        run: make dist VERSION="${{ steps.version.outputs.version }}"
+
+      - name: Prepare release assets
+        # The Silo plugin catalog and server install raw binaries named
+        # plugin-<os>-<arch> and verify them against checksums.txt. Publish
+        # those alongside the reproducible ZIP archives from `make dist`.
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p release
+          cp dist/*.zip release/
+          cp dist/checksums.txt release/checksums.txt
+          for platform in linux-amd64 linux-arm64 darwin-arm64; do
+            archive="dist/silo-plugin-tailscale-${version}-${platform}.zip"
+            unzip -p "$archive" plugin > "release/plugin-${platform}"
+            chmod 0755 "release/plugin-${platform}"
+            (cd release && sha256sum "plugin-${platform}" >> checksums.txt)
+          done
+          cat release/checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: |
+            release/plugin-linux-amd64
+            release/plugin-linux-arm64
+            release/plugin-darwin-arm64
+            release/*.zip
+            release/checksums.txt
+          generate_release_notes: true
+
+      - name: Notify approved community catalog
+        env:
+          DISPATCH_TOKEN: ${{ secrets.SILO_PLUGINS_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo "::warning::SILO_PLUGINS_DISPATCH_TOKEN is not set; catalog was not notified."
+            exit 0
+          fi
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/Silo-Community/silo-plugins/dispatches \
+            -d "$(printf '{"event_type":"plugin_release_published","client_payload":{"repo":"Silo-Community/silo-plugin-tailscale","tag":"%s"}}' "${{ steps.version.outputs.tag }}")"

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Community/silo-plugin-tailscale/internal/tailscale"
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
-	"github.com/ironicbadger/silo-plugin-tailscale/internal/tailscale"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"

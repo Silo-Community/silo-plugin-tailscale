@@ -8,11 +8,11 @@ import (
 	"os"
 	"sync"
 
+	"github.com/Silo-Community/silo-plugin-tailscale/internal/tailscale"
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/manifest"
 	sdkruntime "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimedefault"
-	"github.com/ironicbadger/silo-plugin-tailscale/internal/tailscale"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"tailscale.com/envknob"
