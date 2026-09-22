@@ -8,7 +8,12 @@
     "summary": "Reach Silo through your tailnet without opening public ports.",
     "description_markdown": "Runs a separate Tailscale node on the API host and every proxy. Exposes the native, Jellyfin and Audiobookshelf listeners over HTTPS. Silo retains its existing authentication.",
     "setup_markdown": "Requires Silo's network-access plugin support, one API host, and MagicDNS plus HTTPS certificates enabled in Tailscale. Save an optional reusable auth key for automatic enrollment across proxies, then select Connect in Settings > Network Access. Otherwise use the authorization URL shown for each host.",
+    "homepage_url": "https://github.com/Silo-Community/silo-plugin-tailscale",
+    "source_url": "https://github.com/Silo-Community/silo-plugin-tailscale",
+    "support_url": "https://github.com/Silo-Community/silo-plugin-tailscale/issues",
+    "changelog_url": "https://github.com/Silo-Community/silo-plugin-tailscale/releases",
     "publisher_name": "ironicbadger",
+    "publisher_url": "https://github.com/ironicbadger",
     "license_spdx": "MIT"
   },
   "supported_platforms": [

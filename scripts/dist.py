@@ -51,7 +51,7 @@ def notices(root, environment):
         if not entry:
             continue
         name, module_version, directory = entry.split("|", 2)
-        if name == "github.com/ironicbadger/silo-plugin-tailscale":
+        if name == "github.com/Silo-Community/silo-plugin-tailscale":
             continue
         files = [p for p in Path(directory).iterdir() if p.is_file()
                  and p.name.upper().startswith(("LICENSE", "COPYING", "NOTICE", "COPYRIGHT"))]
