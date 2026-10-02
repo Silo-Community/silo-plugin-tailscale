@@ -66,7 +66,7 @@ func TestTSNetStoresIdentityWithoutLocalFiles(t *testing.T) {
 	if err := adapter.Start(); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := adapter.ListenTLS(ctx, ":443", &tls.Config{MinVersion: tls.VersionTLS12}, false)
+	listener, err := adapter.ListenTLS(ctx, ":443", &tls.Config{MinVersion: tls.VersionTLS12})
 	if err != nil {
 		_ = restarted.Close()
 		t.Fatal(err)

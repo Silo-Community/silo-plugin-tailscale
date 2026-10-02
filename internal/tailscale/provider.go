@@ -43,18 +43,26 @@ type Provider struct {
 	reported chan struct{}
 	restored bool
 	closed   atomic.Bool
+	// identity is the connected overlay sign-in reads (identity.go); nil
+	// while it is not serving.
+	identityMu sync.RWMutex
+	identity   identitySource
 }
 
+// New returns a provider. A nil run uses the tsnet runner, which also feeds
+// sign-in; a test runner leaves sign-in unavailable.
 func New(host Host, config Config, run Runner) *Provider {
-	if run == nil {
-		run = Run
-	}
 	done := make(chan struct{})
 	close(done)
 	ctx, stop := context.WithCancel(context.Background())
 	p := &Provider{host: host, config: config, run: run, life: make(chan struct{}, 1), done: done,
 		wake: make(chan struct{}, 1), stop: stop, reported: make(chan struct{}),
 		status: &pluginv1.NetworkAccessStatus{State: "disconnected", ProviderVersion: ProviderVersion}}
+	if p.run == nil {
+		p.run = func(ctx context.Context, host Host, config Config, publish func(*pluginv1.NetworkAccessStatus)) error {
+			return Run(ctx, host, config, publish, p.setIdentity)
+		}
+	}
 	go func() {
 		defer close(p.reported)
 		p.report(ctx)

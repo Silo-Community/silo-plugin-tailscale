@@ -76,17 +76,37 @@ func TestTags(t *testing.T) {
 	}
 }
 
-func TestFunnelRequiresExplicitBoolean(t *testing.T) {
-	defaults, err := ParseConfig(nil)
-	if err != nil || defaults.Funnel {
-		t.Fatal("Funnel must default off")
-	}
-	for _, value := range []any{true, false, "true", 1} {
+// Funnel was removed: a saved switch still configures and changes nothing,
+// but a malformed value is still refused.
+func TestLegacyFunnelSettingIsIgnored(t *testing.T) {
+	for value, valid := range map[any]bool{true: true, false: true, "true": false} {
 		v, _ := structpb.NewStruct(map[string]any{"funnel": value})
 		c, err := ParseConfig([]*pluginv1.ConfigEntry{{Key: "tailscale", Value: v}})
-		b, valid := value.(bool)
-		if (err == nil) != valid || valid && c.Funnel != b {
+		if (err == nil) != valid {
 			t.Fatalf("funnel %v: %v", value, err)
+		}
+		if valid && c.HostnamePrefix != "silo" {
+			t.Fatalf("funnel %v changed the config: %+v", value, c)
+		}
+	}
+}
+
+func TestSignInAccess(t *testing.T) {
+	defaults, err := ParseConfig(nil)
+	if err != nil || defaults.SignInAccess != SignInAnyone {
+		t.Fatalf("default access = %q, %v", defaults.SignInAccess, err)
+	}
+	for value, want := range map[string]string{"": SignInAnyone, "anyone": SignInAnyone, "policy": SignInPolicy, "everyone": ""} {
+		v, _ := structpb.NewStruct(map[string]any{"sign_in_access": value})
+		c, err := ParseConfig([]*pluginv1.ConfigEntry{{Key: "tailscale", Value: v}})
+		if want == "" {
+			if err == nil {
+				t.Fatalf("access %q accepted", value)
+			}
+			continue
+		}
+		if err != nil || c.SignInAccess != want {
+			t.Fatalf("access %q = %q, %v", value, c.SignInAccess, err)
 		}
 	}
 }

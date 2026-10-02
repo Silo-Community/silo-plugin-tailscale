@@ -14,6 +14,7 @@ import (
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 	"tailscale.com/client/local"
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/health"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -84,14 +85,16 @@ func connectedStatus(info *runtimehost.HostInfo, st *ipnstate.Status) (*pluginv1
 	return s, nil
 }
 
-// overlay exposes the narrow tsnet surface used by the connection lifecycle.
-// Keeping transport construction here permits deterministic failure-path tests.
+// overlay exposes the narrow tsnet surface used by the connection lifecycle
+// and by sign-in (identitySource). Keeping transport construction here
+// permits deterministic failure-path tests.
 type overlay interface {
+	identitySource
 	Start() error
 	Close() error
 	Status(context.Context) (*ipnstate.Status, error)
 	CertPair(context.Context, string) ([]byte, []byte, error)
-	ListenTLS(context.Context, string, *tls.Config, bool) (net.Listener, error)
+	ListenTLS(context.Context, string, *tls.Config) (net.Listener, error)
 	Watch(context.Context) (notificationWatcher, error)
 }
 
@@ -114,23 +117,34 @@ func (s *tsnetOverlay) Start() error {
 	return err
 }
 
-func (s *tsnetOverlay) ListenTLS(ctx context.Context, address string, config *tls.Config, public bool) (net.Listener, error) {
-	// Clear stale Serve/Funnel configuration even when reopening privately.
+// ListenTLS listens on the tailnet only. Up clears any Serve or Funnel
+// configuration an earlier release left behind, so a node that had Funnel on
+// stops answering publicly at the first start of this one.
+func (s *tsnetOverlay) ListenTLS(ctx context.Context, address string, config *tls.Config) (net.Listener, error) {
 	if _, err := s.Server.Up(ctx); err != nil {
 		return nil, err
 	}
-	if !public {
-		listener, err := s.Server.Listen("tcp", address)
-		if err != nil {
-			return nil, err
-		}
-		return tls.NewListener(listener, config), nil
+	listener, err := s.Server.Listen("tcp", address)
+	if err != nil {
+		return nil, err
 	}
-	return s.Server.ListenFunnel("tcp", address, tsnet.FunnelTLSConfig(config))
+	return tls.NewListener(listener, config), nil
 }
 
 func (s *tsnetOverlay) Status(ctx context.Context) (*ipnstate.Status, error) {
 	return s.client.StatusWithoutPeers(ctx)
+}
+func (s *tsnetOverlay) PeerStatus(ctx context.Context) (*ipnstate.Status, error) {
+	return s.client.Status(ctx)
+}
+func (s *tsnetOverlay) WhoIs(ctx context.Context, addr string) (*apitype.WhoIsResponse, error) {
+	return s.client.WhoIs(ctx, addr)
+}
+func (s *tsnetOverlay) ControlURL() string {
+	if s.Server.ControlURL != "" {
+		return s.Server.ControlURL
+	}
+	return ipn.DefaultControlURL
 }
 func (s *tsnetOverlay) CertPair(ctx context.Context, hostname string) ([]byte, []byte, error) {
 	return s.client.CertPair(ctx, hostname)
@@ -139,18 +153,21 @@ func (s *tsnetOverlay) Watch(ctx context.Context) (notificationWatcher, error) {
 	return s.client.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyInitialHealthState|ipn.NotifyNoPrivateKeys)
 }
 
-func Run(ctx context.Context, host Host, config Config, publish func(*pluginv1.NetworkAccessStatus)) error {
+// Run is the production overlay runner. identity receives the overlay while
+// it is connected and serving, and nil otherwise, for sign-in lookups.
+func Run(ctx context.Context, host Host, config Config, publish func(*pluginv1.NetworkAccessStatus), identity func(identitySource)) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	return runOverlay(ctx, host, config, publish, func(info *runtimehost.HostInfo) overlay {
+	return runOverlay(ctx, host, config, publish, identity, func(info *runtimehost.HostInfo) overlay {
 		return &tsnetOverlay{Server: &tsnet.Server{Hostname: Hostname(config, info), Store: StateStore{host}, NoLocalState: true,
 			AuthKey: config.AuthKey, AdvertiseTags: config.Tags, UserLogf: func(string, ...any) {}, Logf: func(string, ...any) {}}}
 	}, ticker.C)
 }
 
-func runOverlay(ctx context.Context, host Host, config Config, publish func(*pluginv1.NetworkAccessStatus), newOverlay func(*runtimehost.HostInfo) overlay, ticks <-chan time.Time) error {
+func runOverlay(ctx context.Context, host Host, config Config, publish func(*pluginv1.NetworkAccessStatus), identity func(identitySource), newOverlay func(*runtimehost.HostInfo) overlay, ticks <-chan time.Time) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	defer identity(nil)
 	call, cancel := context.WithTimeout(ctx, 10*time.Second)
 	info, err := host.GetHostInfo(call)
 	cancel()
@@ -224,6 +241,7 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 			return &PublicError{"cannot read tsnet status; reconnect to retry"}
 		}
 		if st.BackendState != "Running" || len(st.TailscaleIPs) == 0 {
+			identity(nil)
 			clearRetry()
 			retryDelay = 15 * time.Second
 			closeServers()
@@ -272,18 +290,15 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 				retryDelay = 15 * time.Second
 				for _, l := range info.Listeners {
 					tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: certificateFor(ctx, srv, s.Hostname)}
-					public := config.Funnel && l.Name == "api"
-					ln, err := srv.ListenTLS(ctx, fmt.Sprintf(":%d", listenerPort(l)), tlsConfig, public)
+					ln, err := srv.ListenTLS(ctx, fmt.Sprintf(":%d", listenerPort(l)), tlsConfig)
 					if err != nil {
-						if public {
-							return &PublicError{"cannot enable Funnel; authorize Funnel for this node in your tailnet policy and check that the API uses a supported HTTPS port"}
-						}
 						return &PublicError{"cannot open all overlay listeners; reconnect to retry"}
 					}
 					servers = append(servers, serve(ctx, ln, nil, l.Address, info.IngressToken, failures))
 				}
 				lastHostname = s.Hostname
 			}
+			identity(srv)
 			publish(s)
 		}
 	waitForChange:

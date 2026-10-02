@@ -26,6 +26,12 @@ var version = "0.1.3"
 type plugin struct {
 	runtimedefault.Server
 	pluginv1.UnimplementedNetworkAccessProviderServer
+	// Sign-in with tailnet identity: the auth_provider.v1 capability's
+	// "network" mode. Only Authenticate, AuthenticatePeer and CheckAccount
+	// are served; the rest answer Unimplemented.
+	pluginv1.UnimplementedAuthProviderServer
+	pluginv1.UnimplementedAuthProviderChecksServer
+	pluginv1.UnimplementedNetworkIdentityAuthServer
 	mu            sync.RWMutex
 	manifest      *pluginv1.PluginManifest
 	provider      *tailscale.Provider
@@ -100,6 +106,37 @@ func (p *plugin) GetStatus(ctx context.Context, req *pluginv1.NetworkAccessGetSt
 	return provider.GetStatus(ctx, req)
 }
 
+// signInProvider is the configured provider for a sign-in RPC. Before
+// Configure, Silo is told the provider cannot answer yet.
+func (p *plugin) signInProvider() (*tailscale.Provider, error) {
+	provider := p.currentProvider()
+	if provider == nil {
+		return nil, status.Error(codes.Unavailable, "plugin is not configured")
+	}
+	return provider, nil
+}
+func (p *plugin) Authenticate(ctx context.Context, req *pluginv1.AuthenticateRequest) (*pluginv1.AuthenticateResponse, error) {
+	provider, err := p.signInProvider()
+	if err != nil {
+		return nil, err
+	}
+	return provider.Authenticate(ctx, req)
+}
+func (p *plugin) AuthenticatePeer(ctx context.Context, req *pluginv1.AuthenticatePeerRequest) (*pluginv1.AuthenticateResponse, error) {
+	provider, err := p.signInProvider()
+	if err != nil {
+		return nil, err
+	}
+	return provider.AuthenticatePeer(ctx, req)
+}
+func (p *plugin) CheckAccount(ctx context.Context, req *pluginv1.CheckAccountRequest) (*pluginv1.CheckAccountResponse, error) {
+	provider, err := p.signInProvider()
+	if err != nil {
+		return nil, err
+	}
+	return provider.CheckAccount(ctx, req)
+}
+
 func (p *plugin) currentProvider() *tailscale.Provider {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -120,5 +157,7 @@ func main() {
 		panic(err)
 	}
 	p := &plugin{manifest: m}
-	sdkruntime.Serve(sdkruntime.ServeConfig{Servers: sdkruntime.CapabilityServers{Runtime: p, NetworkAccessProvider: p}})
+	// The runtime registers AuthProviderChecks and NetworkIdentityAuth because
+	// the AuthProvider server implements them too.
+	sdkruntime.Serve(sdkruntime.ServeConfig{Servers: sdkruntime.CapabilityServers{Runtime: p, NetworkAccessProvider: p, AuthProvider: p}})
 }

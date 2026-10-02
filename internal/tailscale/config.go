@@ -14,13 +14,22 @@ import (
 type Config struct {
 	HostnamePrefix, AuthKey string
 	Tags                    []string
-	Funnel                  bool
+	// SignInAccess is who may sign in to Silo with their tailnet identity:
+	// SignInAnyone or SignInPolicy.
+	SignInAccess string
 }
+
+// Sign-in access modes. Anyone whose untagged device reaches Silo can sign in
+// by default; policy mode admits only peers granted CapSilo.
+const (
+	SignInAnyone = "anyone"
+	SignInPolicy = "policy"
+)
 
 var prefixPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
 
 func ParseConfig(entries []*pluginv1.ConfigEntry) (Config, error) {
-	c := Config{HostnamePrefix: "silo"}
+	c := Config{HostnamePrefix: "silo", SignInAccess: SignInAnyone}
 	seen := false
 	for _, entry := range entries {
 		if entry.GetKey() != "tailscale" || seen {
@@ -29,10 +38,11 @@ func ParseConfig(entries []*pluginv1.ConfigEntry) (Config, error) {
 		seen = true
 		for key, value := range entry.GetValue().GetFields() {
 			if key == "funnel" {
+				// Funnel was removed; installs that saved the switch still
+				// configure, and the value is ignored.
 				if _, ok := value.GetKind().(*structpb.Value_BoolValue); !ok {
 					return c, fmt.Errorf("funnel must be a boolean")
 				}
-				c.Funnel = value.GetBoolValue()
 				continue
 			}
 			if _, ok := value.GetKind().(*structpb.Value_StringValue); !ok {
@@ -61,6 +71,14 @@ func ParseConfig(entries []*pluginv1.ConfigEntry) (Config, error) {
 				}
 				if len(c.Tags) > 32 {
 					return c, fmt.Errorf("at most 32 tags may be advertised")
+				}
+			case "sign_in_access":
+				switch access := value.GetStringValue(); access {
+				case "":
+				case SignInAnyone, SignInPolicy:
+					c.SignInAccess = access
+				default:
+					return c, fmt.Errorf("sign-in access must be anyone or policy")
 				}
 			default:
 				return c, fmt.Errorf("unexpected configuration field")

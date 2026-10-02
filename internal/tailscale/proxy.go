@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -43,9 +45,41 @@ func NewProxy(address, token string) (*httputil.ReverseProxy, *http.Transport) {
 			r.Out.Header.Set("X-Forwarded-For", peer)
 			r.Out.Header.Set("X-Forwarded-Proto", "https")
 			r.Out.Header.Set("X-Silo-Ingress-Token", token)
+			// Every connection comes from a tailnet peer (the node listens on
+			// the tailnet only), so Silo may ask who it is (AuthenticatePeer),
+			// unless another proxy relayed the request.
+			r.Out.Header.Del("X-Silo-Ingress-Peer")
+			if addr, err := netip.ParseAddr(peer); err == nil && !relayed(r.In.Header) {
+				r.Out.Header.Set("X-Silo-Ingress-Peer", addr.String())
+			}
 		},
 	}
 	return p, transport
+}
+
+// relayHeaders mark a request that another proxy forwarded: a reverse proxy
+// or Tailscale Serve/Funnel on a tailnet device, pointed at this node. The
+// connection then comes from the relay's device, so its owner is not the
+// person making the request. A relay that adds none of them (a plain TCP
+// forwarder) cannot be told apart; such a device must be tagged, and tagged
+// devices are refused.
+var relayHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+	"X-Real-IP", "Via", "CF-Connecting-IP", "True-Client-IP"}
+
+// relayed reports whether header carries a relay's forwarding metadata,
+// including Tailscale Serve's identity headers (Tailscale-*).
+func relayed(header http.Header) bool {
+	for _, name := range relayHeaders {
+		if header.Values(name) != nil {
+			return true
+		}
+	}
+	for name := range header {
+		if strings.HasPrefix(name, "Tailscale-") {
+			return true
+		}
+	}
+	return false
 }
 
 // Track hijacked WebSocket connections too: http.Server.Close alone leaves

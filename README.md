@@ -11,13 +11,28 @@ Requires a Silo server with network-access plugin support, with MagicDNS and HTT
 3. Save, then select **Connect** in **Settings > Network Access**. Sign in if prompted.
 4. Open the reported HTTPS URL from a device running Tailscale.
 
-## Funnel
+## Sign in with Tailscale
 
-Optional public access. Disabled by default.
+People whose device reaches Silo over Tailscale can sign in as the device's owner, with no password: a TV signed in to Tailscale gets a "Continue as" button. Turn it on under **Settings > Sign-in > Network sign-in** in Silo (Silo with network identity sign-in support is required).
 
-> CAUTION: Exposes Silo to the open public internet, you probably don't want to do this.
-> This feature requires Funnel authorization in your Tailscale account and ACL policy file.
-> Funnel is not well suited to streaming video. Proceed at your own risk.
+- **Who can sign in.** By default, anyone whose untagged device reaches the Silo node, including people you share the node with. Set **Who can sign in** to *Only people granted siloserver.org/cap/silo* to require a grant. Tagged devices never sign in this way.
+- **Roles.** A grant in your tailnet policy sets the Silo role:
+
+  ```hujson
+  "grants": [
+    {"src": ["group:family-admins"], "dst": ["tag:silo"],
+     "app": {"siloserver.org/cap/silo": [{"role": "admin"}]}},
+    {"src": ["autogroup:member", "autogroup:shared"], "dst": ["tag:silo"],
+     "app": {"siloserver.org/cap/silo": [{"role": "user"}]}}
+  ]
+  ```
+
+  `{"role":"admin"}` makes someone a Silo admin; `{"role":"user"}` (or `{}`) a regular user. A person's role is the highest any of their devices is granted. Without a grant the role is left to Silo, so removing someone's admin grant does not demote them: grant `{"role":"user"}` instead. Anyone who can edit the tailnet policy can make themselves a Silo admin. When an account also signs in through Silo's main sign-in provider (OIDC or LDAP), that provider sets its role instead.
+- **Removal.** Someone removed from the tailnet, or whose share is revoked, can no longer reach Silo, and Silo signs their sessions out at its next access re-check.
+- **Shared devices.** Everyone using a device signs in as whoever signed that device in to Tailscale, with that person's role, and can link that person's identity to their own Silo account. Sign shared TVs in to Tailscale as someone without an admin grant; Silo profiles keep the household's watching apart.
+- **Relays.** A device that forwards other people's traffic to Silo (a reverse proxy, Tailscale Serve or Funnel on another machine, a router that masquerades its LAN into the tailnet) would make everyone behind it look like its owner. Requests that carry forwarding headers (`X-Forwarded-For`, `Forwarded`, `Via`, Tailscale Serve's headers) get no "Continue as" button, but a plain TCP forwarder adds none: tag every device that relays traffic to Silo.
+
+Funnel (public internet access) was removed: Silo is reachable only from your tailnet. An install that had it on stops answering publicly at the first start of this version.
 
 [Developer documentation](docs/DEVELOPMENT.md)
 
