@@ -58,7 +58,7 @@
       "key": "tailscale",
       "title": "Tailscale",
       "description": "Enrollment settings shared by all hosts. Each host retains its own node identity.",
-      "json_schema": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"hostname_prefix\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$\",\"default\":\"silo\"},\"auth_key\":{\"type\":\"string\",\"writeOnly\":true},\"tags\":{\"type\":\"string\",\"default\":\"\"},\"funnel\":{\"type\":\"boolean\",\"default\":false,\"deprecated\":true,\"description\":\"Removed; ignored.\"},\"sign_in_access\":{\"type\":\"string\",\"enum\":[\"anyone\",\"policy\"],\"default\":\"anyone\"}}}",
+      "json_schema": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"hostname_prefix\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$\",\"default\":\"silo\"},\"auth_key\":{\"type\":\"string\",\"writeOnly\":true},\"tags\":{\"type\":\"string\",\"default\":\"\"},\"funnel\":{\"type\":\"boolean\",\"default\":false,\"deprecated\":true,\"description\":\"Removed; ignored.\"},\"sign_in_access\":{\"type\":\"string\",\"enum\":[\"anyone\",\"policy\"],\"default\":\"anyone\"},\"subnet_routers\":{\"type\":\"string\",\"enum\":[\"allow\",\"refuse\"],\"default\":\"allow\"}}}",
       "admin_form": {
         "fields": [
           {
@@ -99,6 +99,25 @@
               }
             ],
             "description": "Who may sign in to Silo with their Tailscale identity once Tailscale is turned on under Settings > Sign-in. Either way, a siloserver.org/cap/silo grant with {\"role\":\"admin\"} or {\"role\":\"user\"} sets the person's Silo role."
+          },
+          {
+            "key": "subnet_routers",
+            "label": "Subnet routers",
+            "control": "ADMIN_FORM_CONTROL_SELECT",
+            "default_value": "allow",
+            "options": [
+              {
+                "value": "allow",
+                "label": "Can sign in",
+                "description": "A subnet router signs in as its owner, like any other device. Machines on the LAN behind it keep their own addresses and get no Tailscale identity."
+              },
+              {
+                "value": "refuse",
+                "label": "Cannot sign in",
+                "description": "For tailnets where a router rewrites forwarded LAN traffic to its own Tailscale address, which would let everyone behind it sign in as its owner."
+              }
+            ],
+            "description": "Whether devices that route a subnet into the tailnet can sign in with their Tailscale identity. Exit nodes are not affected."
           }
         ]
       }

@@ -17,6 +17,10 @@ type Config struct {
 	// SignInAccess is who may sign in to Silo with their tailnet identity:
 	// SignInAnyone or SignInPolicy.
 	SignInAccess string
+	// RefuseSubnetRouters keeps devices that route a subnet into the tailnet
+	// from signing in, for tailnets whose routers rewrite forwarded LAN
+	// traffic to their own Tailscale address.
+	RefuseSubnetRouters bool
 }
 
 // Sign-in access modes. Anyone whose untagged device reaches Silo can sign in
@@ -79,6 +83,14 @@ func ParseConfig(entries []*pluginv1.ConfigEntry) (Config, error) {
 					c.SignInAccess = access
 				default:
 					return c, fmt.Errorf("sign-in access must be anyone or policy")
+				}
+			case "subnet_routers":
+				switch value.GetStringValue() {
+				case "", "allow":
+				case "refuse":
+					c.RefuseSubnetRouters = true
+				default:
+					return c, fmt.Errorf("subnet routers must be allow or refuse")
 				}
 			default:
 				return c, fmt.Errorf("unexpected configuration field")

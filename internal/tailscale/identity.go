@@ -78,7 +78,7 @@ func (p *Provider) AuthenticatePeer(ctx context.Context, req *pluginv1.Authentic
 	if who.Node.Expired {
 		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED, "device key expired"), nil
 	}
-	if routesForOthers(who.Node) {
+	if p.config.RefuseSubnetRouters && routesForOthers(who.Node) {
 		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED, "device routes traffic for other machines"), nil
 	}
 	role, granted := grantedRole(who.CapMap)
@@ -98,11 +98,11 @@ func (p *Provider) AuthenticatePeer(ctx context.Context, req *pluginv1.Authentic
 	return identityResponse(source.ControlURL(), *who.UserProfile, max(role, person.role)), nil
 }
 
-// routesForOthers reports whether node forwards traffic from other machines
-// into the tailnet: it has approved subnet routes or advertises some. A
-// subnet router masquerades its LAN, so a connection from it may come from
-// anyone behind it, not its owner. Exit node routes do not count: they carry
-// traffic out of the tailnet, not into it.
+// routesForOthers reports whether node routes a subnet into the tailnet: it
+// has approved subnet routes or advertises some. Routers sign in by default:
+// LAN traffic a router forwards keeps its LAN source address (Tailscale's
+// SNAT covers traffic into the LAN), which WhoIs never matches. Exit node
+// routes do not count: they carry traffic out of the tailnet, not into it.
 func routesForOthers(node *tailcfg.Node) bool {
 	return tsaddr.ContainsNonExitSubnetRoutes(views.SliceOf(node.PrimaryRoutes)) ||
 		node.Hostinfo.Valid() && tsaddr.ContainsNonExitSubnetRoutes(node.Hostinfo.RoutableIPs())

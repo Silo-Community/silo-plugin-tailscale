@@ -110,3 +110,23 @@ func TestSignInAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestSubnetRouters(t *testing.T) {
+	defaults, err := ParseConfig(nil)
+	if err != nil || defaults.RefuseSubnetRouters {
+		t.Fatalf("default refuse = %v, %v", defaults.RefuseSubnetRouters, err)
+	}
+	for value, want := range map[string]*bool{"": new(false), "allow": new(false), "refuse": new(true), "deny": nil} {
+		v, _ := structpb.NewStruct(map[string]any{"subnet_routers": value})
+		c, err := ParseConfig([]*pluginv1.ConfigEntry{{Key: "tailscale", Value: v}})
+		if want == nil {
+			if err == nil {
+				t.Fatalf("subnet routers %q accepted", value)
+			}
+			continue
+		}
+		if err != nil || c.RefuseSubnetRouters != *want {
+			t.Fatalf("subnet routers %q = %v, %v", value, c.RefuseSubnetRouters, err)
+		}
+	}
+}

@@ -166,10 +166,7 @@ func TestAuthenticatePeerAsksWhoIsOncePerDevice(t *testing.T) {
 func TestAuthenticatePeerRefusals(t *testing.T) {
 	expired := device(alice, nil)
 	expired.Node.Expired = true
-	router := device(alice, nil)
-	router.Node.PrimaryRoutes = []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
-	advertising := device(alice, nil)
-	advertising.Node.Hostinfo = (&tailcfg.Hostinfo{RoutableIPs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}).View()
+	router, advertising := routers()
 	tailnet := &fakeTailnet{whois: map[string]*apitype.WhoIsResponse{
 		"100.64.0.10": device(alice, nil, "tag:tv"),
 		"100.64.0.11": {Node: &tailcfg.Node{}},
@@ -195,8 +192,8 @@ func TestAuthenticatePeerRefusals(t *testing.T) {
 		{"policy mode without grant", signInProvider(tailnet, SignInPolicy), "100.64.0.12", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
 		{"whois failing", signInProvider(&fakeTailnet{whoisErr: errors.New("local api down")}, SignInAnyone), "100.64.0.12", pluginv1.AuthDenial_AUTH_DENIAL_PROVIDER_UNAVAILABLE},
 		{"expired device", signInProvider(tailnet, SignInAnyone), "100.64.0.13", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
-		{"subnet router", signInProvider(tailnet, SignInAnyone), "100.64.0.14", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
-		{"advertises routes", signInProvider(tailnet, SignInAnyone), "100.64.0.15", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
+		{"subnet router, routers refused", refusingRouters(tailnet), "100.64.0.14", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
+		{"advertises routes, routers refused", refusingRouters(tailnet), "100.64.0.15", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
 		{"person not in the peer list", signInProvider(unlisted, SignInAnyone), "100.64.0.12", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,6 +202,38 @@ func TestAuthenticatePeerRefusals(t *testing.T) {
 				t.Fatalf("response = %+v, want denial %v and no subject", got, tc.denial)
 			}
 		})
+	}
+}
+
+// routers returns alice's subnet router with an approved route and her device
+// that only advertises one.
+func routers() (router, advertising *apitype.WhoIsResponse) {
+	router = device(alice, nil)
+	router.Node.PrimaryRoutes = []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+	advertising = device(alice, nil)
+	advertising.Node.Hostinfo = (&tailcfg.Hostinfo{RoutableIPs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}).View()
+	return router, advertising
+}
+
+func refusingRouters(source identitySource) *Provider {
+	p := signInProvider(source, SignInAnyone)
+	p.config.RefuseSubnetRouters = true
+	return p
+}
+
+// Subnet routers sign in as their owner unless the subnet_routers setting
+// refuses them.
+func TestAuthenticatePeerAdmitsSubnetRoutersByDefault(t *testing.T) {
+	router, advertising := routers()
+	tailnet := &fakeTailnet{whois: map[string]*apitype.WhoIsResponse{
+		"100.64.0.14": router,
+		"100.64.0.15": advertising,
+	}}
+	for _, peer := range []string{"100.64.0.14", "100.64.0.15"} {
+		got := authenticate(t, signInProvider(tailnet, SignInAnyone), peer)
+		if got.GetDenial() != pluginv1.AuthDenial_AUTH_DENIAL_UNSPECIFIED || got.GetExternalSubject() != "controlplane.tailscale.com|101" {
+			t.Fatalf("router %s response = %+v, want alice", peer, got)
+		}
 	}
 }
 
