@@ -17,13 +17,15 @@ import (
 
 // fakeTailnet answers WhoIs and the peer list from fixed tables.
 type fakeTailnet struct {
-	whois     map[string]*apitype.WhoIsResponse
-	status    *ipnstate.Status
-	whoisErr  error
-	statusErr error
+	whois      map[string]*apitype.WhoIsResponse
+	status     *ipnstate.Status
+	whoisErr   error
+	statusErr  error
+	whoisCalls int
 }
 
 func (f *fakeTailnet) WhoIs(_ context.Context, addr string) (*apitype.WhoIsResponse, error) {
+	f.whoisCalls++
 	if f.whoisErr != nil {
 		return nil, f.whoisErr
 	}
@@ -137,12 +139,48 @@ func TestAuthenticatePeerAnswersThePersonsRole(t *testing.T) {
 	}
 }
 
+// An exit node carries traffic out of the tailnet, not into it, so its owner
+// still signs in from it.
+func TestAuthenticatePeerAllowsExitNodes(t *testing.T) {
+	exitNode := device(alice, nil)
+	exitNode.Node.Hostinfo = (&tailcfg.Hostinfo{RoutableIPs: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}}).View()
+	tailnet := &fakeTailnet{whois: map[string]*apitype.WhoIsResponse{"100.64.0.7": exitNode}}
+	if got := authenticate(t, signInProvider(tailnet, SignInAnyone), "100.64.0.7"); got.GetDenial() != pluginv1.AuthDenial_AUTH_DENIAL_UNSPECIFIED {
+		t.Fatalf("exit node = %+v, want signed in", got)
+	}
+}
+
+// Sign-in reuses the requesting device's WhoIs for the person's role instead
+// of asking again.
+func TestAuthenticatePeerAsksWhoIsOncePerDevice(t *testing.T) {
+	tailnet := &fakeTailnet{whois: map[string]*apitype.WhoIsResponse{
+		"100.64.0.7": device(alice, grants(`{"role":"user"}`)),
+		"100.64.0.8": device(alice, nil),
+	}}
+	authenticate(t, signInProvider(tailnet, SignInAnyone), "100.64.0.7")
+	if tailnet.whoisCalls != 2 {
+		t.Fatalf("WhoIs calls = %d, want 2 (one per device)", tailnet.whoisCalls)
+	}
+}
+
 func TestAuthenticatePeerRefusals(t *testing.T) {
+	expired := device(alice, nil)
+	expired.Node.Expired = true
+	router := device(alice, nil)
+	router.Node.PrimaryRoutes = []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+	advertising := device(alice, nil)
+	advertising.Node.Hostinfo = (&tailcfg.Hostinfo{RoutableIPs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}).View()
 	tailnet := &fakeTailnet{whois: map[string]*apitype.WhoIsResponse{
 		"100.64.0.10": device(alice, nil, "tag:tv"),
 		"100.64.0.11": {Node: &tailcfg.Node{}},
 		"100.64.0.12": device(bob, nil),
+		"100.64.0.13": expired,
+		"100.64.0.14": router,
+		"100.64.0.15": advertising,
 	}}
+	// The node knows the device, but its peer list has no device of the
+	// person: CheckAccount would answer not found.
+	unlisted := &fakeTailnet{whois: tailnet.whois, status: peerList(peer(alice, "100.64.0.20"))}
 	for _, tc := range []struct {
 		name   string
 		p      *Provider
@@ -156,6 +194,10 @@ func TestAuthenticatePeerRefusals(t *testing.T) {
 		{"not an address", signInProvider(tailnet, SignInAnyone), "laptop", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
 		{"policy mode without grant", signInProvider(tailnet, SignInPolicy), "100.64.0.12", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
 		{"whois failing", signInProvider(&fakeTailnet{whoisErr: errors.New("local api down")}, SignInAnyone), "100.64.0.12", pluginv1.AuthDenial_AUTH_DENIAL_PROVIDER_UNAVAILABLE},
+		{"expired device", signInProvider(tailnet, SignInAnyone), "100.64.0.13", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
+		{"subnet router", signInProvider(tailnet, SignInAnyone), "100.64.0.14", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
+		{"advertises routes", signInProvider(tailnet, SignInAnyone), "100.64.0.15", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
+		{"person not in the peer list", signInProvider(unlisted, SignInAnyone), "100.64.0.12", pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := authenticate(t, tc.p, tc.peer)
@@ -177,7 +219,12 @@ func TestGrantsSetTheRoleAndPolicyModeAccess(t *testing.T) {
 		{"admin", grants(`{"role":"admin"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_ADMIN, true},
 		{"user", grants(`{"role":"user"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_USER, true},
 		{"empty value", grants(`{}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_USER, true},
-		{"unknown role", grants(`{"role":"owner"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_USER, true},
+		{"unknown role", grants(`{"role":"owner"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false},
+		{"misspelled role", grants(`{"role":"Admin"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false},
+		{"misspelled key", grants(`{"rol":"admin"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false},
+		{"null", grants(`null`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false},
+		{"not an object", grants(`["admin"]`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false},
+		{"trailing data", grants(`{} {}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false},
 		{"malformed only", grants(`not json`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false},
 		{"malformed beside user", grants(`not json`, `{"role":"user"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_USER, true},
 		{"highest wins", grants(`{"role":"user"}`, `{"role":"admin"}`, `{"role":"user"}`), pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_ADMIN, true},

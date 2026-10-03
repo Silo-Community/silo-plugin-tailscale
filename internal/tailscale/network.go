@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
@@ -167,7 +168,7 @@ func Run(ctx context.Context, host Host, config Config, publish func(*pluginv1.N
 func runOverlay(ctx context.Context, host Host, config Config, publish func(*pluginv1.NetworkAccessStatus), identity func(identitySource), newOverlay func(*runtimehost.HostInfo) overlay, ticks <-chan time.Time) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	defer identity(nil)
+	identity = withdrawOnCancel(ctx, identity)
 	call, cancel := context.WithTimeout(ctx, 10*time.Second)
 	info, err := host.GetHostInfo(call)
 	cancel()
@@ -183,8 +184,10 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 	}
 	// Close is legal only after Start completes. It interrupts active network
 	// operations and listeners on cancellation without deleting the identity.
+	// Sign-in stops reading the node before it closes, so it answers "not
+	// connected" instead of calling a closing LocalClient.
 	closed := make(chan struct{})
-	go func() { <-ctx.Done(); _ = srv.Close(); close(closed) }()
+	go func() { <-ctx.Done(); identity(nil); _ = srv.Close(); close(closed) }()
 	defer func() { stop(); <-closed }()
 	watcher, err := srv.Watch(ctx)
 	if err != nil {
@@ -212,7 +215,11 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 	loginError := false
 	failures := make(chan error, len(info.Listeners))
 	var servers []serving
+	// Sign-in reads the node only while it is serving, so closing the
+	// listeners withdraws it, including on a rename whose new certificate is
+	// not issued yet.
 	closeServers := func() {
+		identity(nil)
 		for _, s := range servers {
 			s.close()
 		}
@@ -241,7 +248,6 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 			return &PublicError{"cannot read tsnet status; reconnect to retry"}
 		}
 		if st.BackendState != "Running" || len(st.TailscaleIPs) == 0 {
-			identity(nil)
 			clearRetry()
 			retryDelay = 15 * time.Second
 			closeServers()
@@ -327,6 +333,21 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 			return &PublicError{"tsnet status monitoring stopped; reconnect to retry"}
 		case <-ticks:
 		}
+	}
+}
+
+// withdrawOnCancel wraps identity so nothing is published once ctx is done.
+// Shutdown withdraws the node before closing it, and a loop iteration racing
+// the cancellation must not publish it again.
+func withdrawOnCancel(ctx context.Context, identity func(identitySource)) func(identitySource) {
+	var mu sync.Mutex
+	return func(source identitySource) {
+		mu.Lock()
+		defer mu.Unlock()
+		if source != nil && ctx.Err() != nil {
+			return
+		}
+		identity(source)
 	}
 }
 

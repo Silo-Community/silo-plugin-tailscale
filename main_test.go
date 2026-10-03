@@ -51,11 +51,11 @@ func TestPluginServesSignIn(t *testing.T) {
 	var _ pluginv1.AuthProviderServer = p
 	var _ pluginv1.AuthProviderChecksServer = p
 	var _ pluginv1.NetworkIdentityAuthServer = p
-	if _, err := p.AuthenticatePeer(t.Context(), &pluginv1.AuthenticatePeerRequest{PeerAddress: "100.64.0.7"}); status.Code(err) != codes.Unavailable {
-		t.Fatalf("unconfigured AuthenticatePeer = %v, want Unavailable", err)
+	if _, err := p.AuthenticatePeer(t.Context(), &pluginv1.AuthenticatePeerRequest{PeerAddress: "100.64.0.7"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unconfigured AuthenticatePeer = %v, want FailedPrecondition", err)
 	}
-	if _, err := p.CheckAccount(t.Context(), &pluginv1.CheckAccountRequest{}); status.Code(err) != codes.Unavailable {
-		t.Fatalf("unconfigured CheckAccount = %v, want Unavailable", err)
+	if _, err := p.CheckAccount(t.Context(), &pluginv1.CheckAccountRequest{}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unconfigured CheckAccount = %v, want FailedPrecondition", err)
 	}
 }
 

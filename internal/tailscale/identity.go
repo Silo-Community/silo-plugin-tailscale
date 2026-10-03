@@ -14,7 +14,9 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/views"
 )
 
 // Sign-in with tailnet identity (Silo's "network" auth mode). Silo calls
@@ -73,20 +75,37 @@ func (p *Provider) AuthenticatePeer(ctx context.Context, req *pluginv1.Authentic
 	if who.Node.IsTagged() {
 		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED, "tagged device"), nil
 	}
+	if who.Node.Expired {
+		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED, "device key expired"), nil
+	}
+	if routesForOthers(who.Node) {
+		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED, "device routes traffic for other machines"), nil
+	}
 	role, granted := grantedRole(who.CapMap)
 	if p.config.SignInAccess == SignInPolicy && !granted {
 		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED, "no Silo grant"), nil
 	}
 	// The role is the person's, as CheckAccount answers it, so signing in
-	// from a device with a narrower grant does not flip it.
-	person, err := personAccess(ctx, source, who.UserProfile.ID)
+	// from a device with a narrower grant does not flip it. A person
+	// CheckAccount would not find does not sign in either.
+	person, err := personAccess(ctx, source, who.UserProfile.ID, map[netip.Addr]tailcfg.PeerCapMap{peer: who.CapMap})
 	if err != nil {
 		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_PROVIDER_UNAVAILABLE, "cannot read the tailnet's devices"), nil
 	}
-	if person != nil {
-		role = max(role, person.role)
+	if person == nil {
+		return refuse(pluginv1.AuthDenial_AUTH_DENIAL_NOT_PERMITTED, "no untagged, unexpired device in the peer list"), nil
 	}
-	return identityResponse(source.ControlURL(), *who.UserProfile, role), nil
+	return identityResponse(source.ControlURL(), *who.UserProfile, max(role, person.role)), nil
+}
+
+// routesForOthers reports whether node forwards traffic from other machines
+// into the tailnet: it has approved subnet routes or advertises some. A
+// subnet router masquerades its LAN, so a connection from it may come from
+// anyone behind it, not its owner. Exit node routes do not count: they carry
+// traffic out of the tailnet, not into it.
+func routesForOthers(node *tailcfg.Node) bool {
+	return tsaddr.ContainsNonExitSubnetRoutes(views.SliceOf(node.PrimaryRoutes)) ||
+		node.Hostinfo.Valid() && tsaddr.ContainsNonExitSubnetRoutes(node.Hostinfo.RoutableIPs())
 }
 
 // CheckAccount re-checks a person from the node's peer list: they must still
@@ -104,7 +123,7 @@ func (p *Provider) CheckAccount(ctx context.Context, req *pluginv1.CheckAccountR
 	if !ok {
 		return &pluginv1.CheckAccountResponse{Status: pluginv1.CheckAccountStatus_CHECK_ACCOUNT_STATUS_NOT_FOUND}, nil
 	}
-	person, err := personAccess(ctx, source, userID)
+	person, err := personAccess(ctx, source, userID, nil)
 	if err != nil {
 		return unavailable, nil
 	}
@@ -131,8 +150,9 @@ type personGrants struct {
 
 // personAccess reads userID's untagged, unexpired devices from the node's
 // peer list. It answers nil when they have none, and an error when the node
-// cannot answer.
-func personAccess(ctx context.Context, source identitySource, userID tailcfg.UserID) (*personGrants, error) {
+// cannot answer. known holds grants already read by address, so a device in
+// it costs no WhoIs.
+func personAccess(ctx context.Context, source identitySource, userID tailcfg.UserID, known map[netip.Addr]tailcfg.PeerCapMap) (*personGrants, error) {
 	status, err := source.PeerStatus(ctx)
 	if err != nil {
 		return nil, err
@@ -140,32 +160,47 @@ func personAccess(ctx context.Context, source identitySource, userID tailcfg.Use
 	if status.BackendState != "Running" {
 		return nil, errors.New("tailnet is not running")
 	}
-	var devices []netip.Addr
+	var devices []*ipnstate.PeerStatus
 	for _, peer := range status.Peer {
 		if peer == nil || peer.UserID != userID || peer.Expired || peer.Tags != nil && peer.Tags.Len() > 0 || len(peer.TailscaleIPs) == 0 {
 			continue
 		}
-		devices = append(devices, peer.TailscaleIPs[0])
+		devices = append(devices, peer)
 	}
-	profile, known := status.User[userID]
-	if len(devices) == 0 || !known {
+	profile, listed := status.User[userID]
+	if len(devices) == 0 || !listed {
 		return nil, nil
 	}
 	found := &personGrants{profile: profile}
 	for _, device := range devices {
-		who, err := source.WhoIs(ctx, device.String())
+		caps, err := deviceGrants(ctx, source, device.TailscaleIPs, known)
+		if errors.Is(err, local.ErrPeerNotFound) {
+			continue
+		}
 		if err != nil {
-			if errors.Is(err, local.ErrPeerNotFound) {
-				continue
-			}
 			return nil, err
 		}
-		if role, granted := grantedRole(who.CapMap); granted {
+		if role, granted := grantedRole(caps); granted {
 			found.granted = true
 			found.role = max(found.role, role)
 		}
 	}
 	return found, nil
+}
+
+// deviceGrants is the app capabilities a device holds toward this node: from
+// known when it lists one of the device's addresses, otherwise from WhoIs.
+func deviceGrants(ctx context.Context, source identitySource, addresses []netip.Addr, known map[netip.Addr]tailcfg.PeerCapMap) (tailcfg.PeerCapMap, error) {
+	for _, address := range addresses {
+		if caps, ok := known[address]; ok {
+			return caps, nil
+		}
+	}
+	who, err := source.WhoIs(ctx, addresses[0].String())
+	if err != nil {
+		return nil, err
+	}
+	return who.CapMap, nil
 }
 
 // Authenticate refuses every password. Silo never sends one to a network
@@ -186,23 +221,35 @@ type siloGrant struct {
 func grantedRole(caps tailcfg.PeerCapMap) (pluginv1.AuthManagedRole, bool) {
 	role, granted := pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false
 	for _, raw := range caps[CapSilo] {
-		var grant siloGrant
-		if err := json.Unmarshal([]byte(raw), &grant); err != nil {
+		grantRole, ok := parseGrant(raw)
+		if !ok {
 			slog.Warn("ignoring a malformed siloserver.org/cap/silo grant value")
 			continue
 		}
 		granted = true
-		switch grant.Role {
-		case "admin":
-			role = pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_ADMIN
-		case "", "user":
-			role = max(role, pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_USER)
-		default:
-			slog.Warn("treating an unknown siloserver.org/cap/silo role as user")
-			role = max(role, pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_USER)
-		}
+		role = max(role, grantRole)
 	}
 	return role, granted
+}
+
+// parseGrant reads one CapSilo value. It is well-formed only as a JSON object
+// whose one optional key, "role", is "admin" or "user" (absent or empty means
+// user). Anything else, such as null, a misspelled key or "Admin", is
+// malformed: a typo in the policy must not grant access.
+func parseGrant(raw tailcfg.RawMessage) (pluginv1.AuthManagedRole, bool) {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	var grant *siloGrant
+	if err := decoder.Decode(&grant); err != nil || grant == nil || decoder.More() {
+		return pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false
+	}
+	switch grant.Role {
+	case "admin":
+		return pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_ADMIN, true
+	case "", "user":
+		return pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_USER, true
+	}
+	return pluginv1.AuthManagedRole_AUTH_MANAGED_ROLE_UNSPECIFIED, false
 }
 
 // subjectPrefix scopes user IDs to the control plane that issued them: the
