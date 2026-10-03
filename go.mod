@@ -3,7 +3,7 @@ module github.com/Silo-Community/silo-plugin-tailscale
 go 1.26.7
 
 require (
-	github.com/Silo-Server/silo-plugin-sdk v0.16.1
+	github.com/Silo-Server/silo-plugin-sdk v0.23.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.7.0
 	google.golang.org/grpc v1.83.2

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -73,6 +74,7 @@ func TestProxyPreservesPlaybackAndReplacesSpoofedHeaders(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "spoof")
 	req.Header.Set("X-Forwarded-Host", "evil.invalid")
 	req.Header.Set("X-Real-IP", "spoof")
+	req.Header["X-Silo-Ingress-Peer"] = []string{"100.64.0.66", "100.64.0.67"}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +93,54 @@ func TestProxyPreservesPlaybackAndReplacesSpoofedHeaders(t *testing.T) {
 	}
 	if r.Header.Get("X-Forwarded-For") != "127.0.0.1" || r.Header.Get("Forwarded") != "" || r.Header.Get("X-Forwarded-Host") != "" || r.Header.Get("X-Real-IP") != "" {
 		t.Fatal("forwarded identity spoofed")
+	}
+	// A request that carries forwarding headers came through a relay, so it
+	// names no peer, and a client's own peer claim never survives.
+	if peers := r.Header.Values("X-Silo-Ingress-Peer"); peers != nil {
+		t.Fatalf("ingress peer = %v, want none for a relayed request", peers)
+	}
+}
+
+// The peer Silo asks about is the connection's, never a client's claim, and
+// only when no relay forwarded the request.
+func TestProxyNamesThePeerOnlyForDirectRequests(t *testing.T) {
+	got := make(chan *http.Request, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Clone(context.Background())
+	}))
+	defer upstream.Close()
+	proxy, transport := NewProxy(strings.TrimPrefix(upstream.URL, "http://"), "host-token")
+	defer transport.CloseIdleConnections()
+	front := httptest.NewServer(proxy)
+	defer front.Close()
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   []string
+	}{
+		{"direct", "", []string{"127.0.0.1"}},
+		{"direct with a forged peer", "X-Silo-Ingress-Peer", []string{"127.0.0.1"}},
+		{"reverse proxy", "X-Forwarded-For", nil},
+		{"standard forwarding", "Forwarded", nil},
+		{"nginx", "X-Real-IP", nil},
+		{"HTTP proxy", "Via", nil},
+		{"Cloudflare tunnel", "CF-Connecting-IP", nil},
+		{"Tailscale Serve", "Tailscale-User-Login", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", front.URL+"/api/v2/auth/providers", nil)
+			if tc.header != "" {
+				req.Header.Set(tc.header, "100.64.0.66")
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if peers := (<-got).Header.Values("X-Silo-Ingress-Peer"); !slices.Equal(peers, tc.want) {
+				t.Fatalf("ingress peer = %v, want %v", peers, tc.want)
+			}
+		})
 	}
 }
 

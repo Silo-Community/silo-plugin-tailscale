@@ -18,6 +18,8 @@ import (
 	"github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestManifest(t *testing.T) {
@@ -31,6 +33,29 @@ func TestManifest(t *testing.T) {
 	fields := m.GlobalConfigSchema[0].AdminForm.Fields
 	if fields[1].Key != "auth_key" || !fields[1].Secret || fields[1].Control != pluginv1.AdminFormControl_ADMIN_FORM_CONTROL_PASSWORD {
 		t.Fatal("auth key is not secret")
+	}
+	if !manifest.AuthProviderUsesNetworkIdentity(m.Capabilities[1]) {
+		t.Fatal("missing the network sign-in capability")
+	}
+	for _, field := range fields {
+		if field.Key == "funnel" {
+			t.Fatal("Funnel is still offered")
+		}
+	}
+}
+
+// The process serves sign-in on the services Silo calls for the "network"
+// auth mode, even before it is configured.
+func TestPluginServesSignIn(t *testing.T) {
+	p := &plugin{}
+	var _ pluginv1.AuthProviderServer = p
+	var _ pluginv1.AuthProviderChecksServer = p
+	var _ pluginv1.NetworkIdentityAuthServer = p
+	if _, err := p.AuthenticatePeer(t.Context(), &pluginv1.AuthenticatePeerRequest{PeerAddress: "100.64.0.7"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unconfigured AuthenticatePeer = %v, want FailedPrecondition", err)
+	}
+	if _, err := p.CheckAccount(t.Context(), &pluginv1.CheckAccountRequest{}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unconfigured CheckAccount = %v, want FailedPrecondition", err)
 	}
 }
 

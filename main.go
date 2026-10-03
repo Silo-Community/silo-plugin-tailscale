@@ -21,11 +21,17 @@ import (
 
 //go:embed manifest.json
 var manifestJSON []byte
-var version = "0.1.3"
+var version = "0.2.0"
 
 type plugin struct {
 	runtimedefault.Server
 	pluginv1.UnimplementedNetworkAccessProviderServer
+	// Sign-in with tailnet identity: the auth_provider.v1 capability's
+	// "network" mode. Only Authenticate, AuthenticatePeer and CheckAccount
+	// are served; the rest answer Unimplemented.
+	pluginv1.UnimplementedAuthProviderServer
+	pluginv1.UnimplementedAuthProviderChecksServer
+	pluginv1.UnimplementedNetworkIdentityAuthServer
 	mu            sync.RWMutex
 	manifest      *pluginv1.PluginManifest
 	provider      *tailscale.Provider
@@ -79,25 +85,57 @@ func (p *plugin) Configure(ctx context.Context, req *pluginv1.ConfigureRequest) 
 	return &pluginv1.ConfigureResponse{}, nil
 }
 func (p *plugin) Connect(ctx context.Context, req *pluginv1.NetworkAccessConnectRequest) (*pluginv1.NetworkAccessStatus, error) {
-	provider := p.currentProvider()
-	if provider == nil {
-		return nil, status.Error(codes.FailedPrecondition, "plugin is not configured")
+	provider, err := p.configuredProvider()
+	if err != nil {
+		return nil, err
 	}
 	return provider.Connect(ctx, req)
 }
 func (p *plugin) Disconnect(ctx context.Context, req *pluginv1.NetworkAccessDisconnectRequest) (*pluginv1.NetworkAccessStatus, error) {
-	provider := p.currentProvider()
-	if provider == nil {
-		return nil, status.Error(codes.FailedPrecondition, "plugin is not configured")
+	provider, err := p.configuredProvider()
+	if err != nil {
+		return nil, err
 	}
 	return provider.Disconnect(ctx, req)
 }
 func (p *plugin) GetStatus(ctx context.Context, req *pluginv1.NetworkAccessGetStatusRequest) (*pluginv1.NetworkAccessStatus, error) {
+	provider, err := p.configuredProvider()
+	if err != nil {
+		return nil, err
+	}
+	return provider.GetStatus(ctx, req)
+}
+
+// configuredProvider is the provider an RPC acts on. Before Configure, every
+// RPC fails with FailedPrecondition, which Silo's sign-in treats as the
+// provider being unavailable.
+func (p *plugin) configuredProvider() (*tailscale.Provider, error) {
 	provider := p.currentProvider()
 	if provider == nil {
 		return nil, status.Error(codes.FailedPrecondition, "plugin is not configured")
 	}
-	return provider.GetStatus(ctx, req)
+	return provider, nil
+}
+func (p *plugin) Authenticate(ctx context.Context, req *pluginv1.AuthenticateRequest) (*pluginv1.AuthenticateResponse, error) {
+	provider, err := p.configuredProvider()
+	if err != nil {
+		return nil, err
+	}
+	return provider.Authenticate(ctx, req)
+}
+func (p *plugin) AuthenticatePeer(ctx context.Context, req *pluginv1.AuthenticatePeerRequest) (*pluginv1.AuthenticateResponse, error) {
+	provider, err := p.configuredProvider()
+	if err != nil {
+		return nil, err
+	}
+	return provider.AuthenticatePeer(ctx, req)
+}
+func (p *plugin) CheckAccount(ctx context.Context, req *pluginv1.CheckAccountRequest) (*pluginv1.CheckAccountResponse, error) {
+	provider, err := p.configuredProvider()
+	if err != nil {
+		return nil, err
+	}
+	return provider.CheckAccount(ctx, req)
 }
 
 func (p *plugin) currentProvider() *tailscale.Provider {
@@ -120,5 +158,7 @@ func main() {
 		panic(err)
 	}
 	p := &plugin{manifest: m}
-	sdkruntime.Serve(sdkruntime.ServeConfig{Servers: sdkruntime.CapabilityServers{Runtime: p, NetworkAccessProvider: p}})
+	// The runtime registers AuthProviderChecks and NetworkIdentityAuth because
+	// the AuthProvider server implements them too.
+	sdkruntime.Serve(sdkruntime.ServeConfig{Servers: sdkruntime.CapabilityServers{Runtime: p, NetworkAccessProvider: p, AuthProvider: p}})
 }

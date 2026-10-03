@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -14,6 +13,8 @@ import (
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
+	"tailscale.com/client/local"
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/health"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -57,7 +58,6 @@ type fakeOverlay struct {
 	failListenAt int
 	listeners    []net.Listener
 	ports        []string
-	public       []bool
 	closed       bool
 	watcher      *fakeWatcher
 }
@@ -88,17 +88,19 @@ func (n *fakeOverlay) Status(context.Context) (*ipnstate.Status, error) {
 	return n.current, n.statusError
 }
 func (n *fakeOverlay) CertPair(ctx context.Context, hostname string) ([]byte, []byte, error) {
-	return n.certificate(ctx, hostname)
+	n.mu.Lock()
+	certificate := n.certificate
+	n.mu.Unlock()
+	return certificate(ctx, hostname)
 }
 func (n *fakeOverlay) Watch(ctx context.Context) (notificationWatcher, error) {
 	n.watcher.ctx = ctx
 	return n.watcher, n.watchError
 }
-func (n *fakeOverlay) ListenTLS(_ context.Context, address string, _ *tls.Config, public bool) (net.Listener, error) {
+func (n *fakeOverlay) ListenTLS(_ context.Context, address string, _ *tls.Config) (net.Listener, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.ports = append(n.ports, address)
-	n.public = append(n.public, public)
 	if len(n.ports) == n.failListenAt {
 		return nil, errors.New("private listener error")
 	}
@@ -108,6 +110,11 @@ func (n *fakeOverlay) ListenTLS(_ context.Context, address string, _ *tls.Config
 	}
 	return listener, err
 }
+func (n *fakeOverlay) PeerStatus(ctx context.Context) (*ipnstate.Status, error) { return n.Status(ctx) }
+func (n *fakeOverlay) WhoIs(context.Context, string) (*apitype.WhoIsResponse, error) {
+	return nil, local.ErrPeerNotFound
+}
+func (n *fakeOverlay) ControlURL() string { return "https://controlplane.tailscale.com" }
 func (n *fakeOverlay) changeStatus(st *ipnstate.Status) {
 	n.mu.Lock()
 	n.current = st
@@ -135,6 +142,30 @@ type overlayRun struct {
 	done     chan struct{}
 	err      error
 	cancel   context.CancelFunc
+	// identity is what the runner last published for sign-in;
+	// withdrawnAfterClose records that it was still published when node
+	// closed.
+	node                *fakeOverlay
+	identityMu          sync.Mutex
+	identity            identitySource
+	withdrawnAfterClose bool
+}
+
+func (r *overlayRun) setIdentity(source identitySource) {
+	r.identityMu.Lock()
+	defer r.identityMu.Unlock()
+	if source == nil && r.identity != nil {
+		r.node.mu.Lock()
+		r.withdrawnAfterClose = r.withdrawnAfterClose || r.node.closed
+		r.node.mu.Unlock()
+	}
+	r.identity = source
+}
+
+func (r *overlayRun) currentIdentity() identitySource {
+	r.identityMu.Lock()
+	defer r.identityMu.Unlock()
+	return r.identity
 }
 
 func startFakeOverlay(t *testing.T, node *fakeOverlay, allListeners bool) *overlayRun {
@@ -143,7 +174,7 @@ func startFakeOverlay(t *testing.T, node *fakeOverlay, allListeners bool) *overl
 func startConfiguredOverlay(t *testing.T, node *fakeOverlay, allListeners bool, config Config) *overlayRun {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	run := &overlayRun{statuses: make(chan *pluginv1.NetworkAccessStatus, 32), done: make(chan struct{}), cancel: cancel}
+	run := &overlayRun{statuses: make(chan *pluginv1.NetworkAccessStatus, 32), done: make(chan struct{}), cancel: cancel, node: node}
 	h := newHost()
 	info, _ := h.GetHostInfo(ctx)
 	if allListeners {
@@ -158,7 +189,7 @@ func startConfiguredOverlay(t *testing.T, node *fakeOverlay, allListeners bool, 
 			case run.statuses <- s:
 			case <-ctx.Done():
 			}
-		}, func(*runtimehost.HostInfo) overlay { return node }, nil)
+		}, run.setIdentity, func(*runtimehost.HostInfo) overlay { return node }, nil)
 	}()
 	t.Cleanup(func() { cancel(); _ = run.wait(t) })
 	return run
@@ -415,18 +446,66 @@ func TestCertificateAutomaticallyRecovers(t *testing.T) {
 	}
 }
 
-func TestFunnelOnlyExposesNativeAPIWhenExplicitlyEnabled(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
-			node := newFakeOverlay()
-			node.current = runningStatus("silo.example.test")
-			run := startConfiguredOverlay(t, node, true, Config{Funnel: enabled})
-			run.state(t, "connected")
-			node.mu.Lock()
-			defer node.mu.Unlock()
-			if len(node.public) != 3 || node.public[0] != enabled || node.public[1] || node.public[2] {
-				t.Fatalf("public listeners: %v", node.public)
-			}
-		})
+// Sign-in reads the overlay only while it is connected and serving.
+func TestOverlayPublishesIdentityOnlyWhileServing(t *testing.T) {
+	node := newFakeOverlay()
+	run := startFakeOverlay(t, node, true)
+	run.state(t, "awaiting_authorization")
+	if run.currentIdentity() != nil {
+		t.Fatal("identity published before the node joined")
+	}
+	node.changeStatus(runningStatus("silo.example.test"))
+	run.state(t, "connected")
+	if run.currentIdentity() != node {
+		t.Fatal("connected overlay not published for sign-in")
+	}
+	node.mu.Lock()
+	if len(node.ports) != 3 {
+		node.mu.Unlock()
+		t.Fatalf("listeners: %v", node.ports)
+	}
+	node.mu.Unlock()
+	node.changeStatus(&ipnstate.Status{BackendState: "NeedsLogin"})
+	run.state(t, "connecting")
+	if run.currentIdentity() != nil {
+		t.Fatal("identity still published after the node left the tailnet")
+	}
+	run.cancel()
+	_ = run.wait(t)
+	if run.currentIdentity() != nil {
+		t.Fatal("identity still published after the overlay stopped")
+	}
+}
+
+// On Disconnect, sign-in stops reading the node before it closes, so it
+// answers "not connected" instead of calling a closing LocalClient.
+func TestOverlayWithdrawsIdentityBeforeClosingTheNode(t *testing.T) {
+	node := newFakeOverlay()
+	run := startFakeOverlay(t, node, false)
+	node.changeStatus(runningStatus("silo.example.test"))
+	run.state(t, "connected")
+	run.cancel()
+	_ = run.wait(t)
+	run.identityMu.Lock()
+	defer run.identityMu.Unlock()
+	if run.identity != nil || run.withdrawnAfterClose {
+		t.Fatalf("identity = %v, withdrawn after close = %v; want withdrawn before the node closed", run.identity, run.withdrawnAfterClose)
+	}
+}
+
+// A renamed node closes its listeners. Until the new name's certificate is
+// issued nothing serves, so sign-in must not answer for the node.
+func TestOverlayWithdrawsIdentityWhileRenamedNodeHasNoCertificate(t *testing.T) {
+	node := newFakeOverlay()
+	run := startFakeOverlay(t, node, false)
+	node.changeStatus(runningStatus("silo.example.test"))
+	run.state(t, "connected")
+	node.mu.Lock()
+	node.certificate = func(context.Context, string) ([]byte, []byte, error) { return nil, nil, errors.New("issuance failed") }
+	node.mu.Unlock()
+	node.changeStatus(runningStatus("renamed.example.test"))
+	run.state(t, "error")
+	if run.currentIdentity() != nil {
+		t.Fatal("identity still published while the renamed node serves nothing")
 	}
 }
