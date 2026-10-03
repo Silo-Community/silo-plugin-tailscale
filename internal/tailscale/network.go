@@ -61,6 +61,25 @@ func listenerPort(l runtimehost.HostListener) int {
 	}
 }
 
+// discoveryRedirectPort is the plain HTTP port that redirects to the API
+// origin, so clients on the tailnet can find the server as "http://<name>/".
+const discoveryRedirectPort = 80
+
+// offersDiscoveryRedirect reports whether this node answers on
+// discoveryRedirectPort: only the API host, whose name people type or clients
+// guess, and only when no Silo listener uses that port itself.
+func offersDiscoveryRedirect(info *runtimehost.HostInfo) bool {
+	if info.HostRole != "api" {
+		return false
+	}
+	for _, l := range info.Listeners {
+		if listenerPort(l) == discoveryRedirectPort {
+			return false
+		}
+	}
+	return true
+}
+
 func connectedStatus(info *runtimehost.HostInfo, st *ipnstate.Status) (*pluginv1.NetworkAccessStatus, error) {
 	if st.Self == nil || st.CurrentTailnet == nil || !st.CurrentTailnet.MagicDNSEnabled {
 		return nil, &PublicError{"enable MagicDNS in the Tailscale admin console"}
@@ -95,6 +114,7 @@ type overlay interface {
 	Close() error
 	Status(context.Context) (*ipnstate.Status, error)
 	CertPair(context.Context, string) ([]byte, []byte, error)
+	Listen(context.Context, string) (net.Listener, error)
 	ListenTLS(context.Context, string, *tls.Config) (net.Listener, error)
 	Watch(context.Context) (notificationWatcher, error)
 }
@@ -122,14 +142,19 @@ func (s *tsnetOverlay) Start() error {
 // configuration an earlier release left behind, so a node that had Funnel on
 // stops answering publicly at the first start of this one.
 func (s *tsnetOverlay) ListenTLS(ctx context.Context, address string, config *tls.Config) (net.Listener, error) {
-	if _, err := s.Server.Up(ctx); err != nil {
-		return nil, err
-	}
-	listener, err := s.Server.Listen("tcp", address)
+	listener, err := s.Listen(ctx, address)
 	if err != nil {
 		return nil, err
 	}
 	return tls.NewListener(listener, config), nil
+}
+
+// Listen opens a plain TCP listener on the tailnet only.
+func (s *tsnetOverlay) Listen(ctx context.Context, address string) (net.Listener, error) {
+	if _, err := s.Server.Up(ctx); err != nil {
+		return nil, err
+	}
+	return s.Server.Listen("tcp", address)
 }
 
 func (s *tsnetOverlay) Status(ctx context.Context) (*ipnstate.Status, error) {
@@ -301,6 +326,13 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 						return &PublicError{"cannot open all overlay listeners; reconnect to retry"}
 					}
 					servers = append(servers, serve(ctx, ln, nil, l.Address, info.IngressToken, failures))
+				}
+				// Discovery is a convenience: a node that cannot open port
+				// 80 still serves every listener, so its failures are ignored.
+				if offersDiscoveryRedirect(info) {
+					if ln, err := srv.Listen(ctx, fmt.Sprintf(":%d", discoveryRedirectPort)); err == nil {
+						servers = append(servers, serveHandler(ctx, ln, nil, discoveryRedirect(s.Origin), nil))
+					}
 				}
 				lastHostname = s.Hostname
 			}

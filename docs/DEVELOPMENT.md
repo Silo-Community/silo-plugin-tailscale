@@ -64,12 +64,21 @@ the storage adaptations described below. An unadapted build fails on the missing
    your policy requires it. Enrollment continues after the API request returns.
 6. Use the reported HTTPS origin in a Silo client on a tailnet-connected device.
    Allow the relevant ports through your tailnet access policy: API 443,
-   Jellyfin 8096, Audiobookshelf 13378 by default. All exposed listeners use TLS.
+   Jellyfin 8096, Audiobookshelf 13378 by default, and 80 on the API host for
+   discovery. All Silo listeners use TLS.
 
 The API listener is always exposed. Enabled Jellyfin and Audiobookshelf listeners
 are exposed on the API host; proxies expose only their API listener. Host-provided
 port overrides are honored. Every listener must bind successfully before status
 becomes `connected`. The server handles per-access-path stream URL selection.
+
+The API host also listens on plain HTTP port 80 and answers `GET` and `HEAD`
+with a `307` redirect to its HTTPS API origin, keeping the path. Silo apps with
+server discovery probe `http://silo/` (MagicDNS completes the bare name) and follow
+the redirect to the name the certificate covers; a person can also type a bare
+machine name. The redirect never proxies to Silo, refuses other methods, and
+is skipped when a listener already uses port 80. A node that cannot open port
+80 still connects. See Silo's `docs/architecture/server-discovery.md`.
 
 **Disconnect** closes listeners, streams, and WebSocket tunnels and saves the
 disconnected intent. It retains node identity. A process restart reconnects only

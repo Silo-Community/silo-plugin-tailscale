@@ -307,3 +307,11 @@ func TestProxyFlushesEvents(t *testing.T) {
 		t.Fatalf("event buffered: %q %v", line, err)
 	}
 }
+
+func TestDiscoveryRedirectRefusesWrites(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	discoveryRedirect("https://silo.example.test").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v2/auth/login", nil))
+	if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Location") != "" {
+		t.Fatalf("POST answered %d with Location %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+}
