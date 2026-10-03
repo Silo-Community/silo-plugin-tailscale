@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"slices"
@@ -61,6 +62,30 @@ func listenerPort(l runtimehost.HostListener) int {
 	}
 }
 
+// discoveryRedirectPort is the plain HTTP port that redirects to the API
+// origin, so clients on the tailnet can find the server as "http://<name>/".
+const discoveryRedirectPort = 80
+
+// discoveryRetryDelay is how long a failed discovery listener waits before
+// the connection loop opens it again.
+var discoveryRetryDelay = 30 * time.Second
+
+// offersDiscoveryRedirect reports whether this node answers on
+// discoveryRedirectPort: only when discovery is on, only on the API host,
+// whose name people type or clients guess, and only when no Silo listener
+// uses that port itself.
+func offersDiscoveryRedirect(config Config, info *runtimehost.HostInfo) bool {
+	if !config.Discovery || info.HostRole != "api" {
+		return false
+	}
+	for _, l := range info.Listeners {
+		if listenerPort(l) == discoveryRedirectPort {
+			return false
+		}
+	}
+	return true
+}
+
 func connectedStatus(info *runtimehost.HostInfo, st *ipnstate.Status) (*pluginv1.NetworkAccessStatus, error) {
 	if st.Self == nil || st.CurrentTailnet == nil || !st.CurrentTailnet.MagicDNSEnabled {
 		return nil, &PublicError{"enable MagicDNS in the Tailscale admin console"}
@@ -95,6 +120,7 @@ type overlay interface {
 	Close() error
 	Status(context.Context) (*ipnstate.Status, error)
 	CertPair(context.Context, string) ([]byte, []byte, error)
+	Listen(context.Context, string) (net.Listener, error)
 	ListenTLS(context.Context, string, *tls.Config) (net.Listener, error)
 	Watch(context.Context) (notificationWatcher, error)
 }
@@ -125,11 +151,19 @@ func (s *tsnetOverlay) ListenTLS(ctx context.Context, address string, config *tl
 	if _, err := s.Server.Up(ctx); err != nil {
 		return nil, err
 	}
-	listener, err := s.Server.Listen("tcp", address)
+	listener, err := s.Listen(ctx, address)
 	if err != nil {
 		return nil, err
 	}
 	return tls.NewListener(listener, config), nil
+}
+
+// Listen opens a plain TCP listener on the tailnet only. It does not bring
+// the node up: it is only called after ListenTLS has, and waiting in Up would
+// stall the connection loop on an optional listener if the backend left
+// Running in between.
+func (s *tsnetOverlay) Listen(_ context.Context, address string) (net.Listener, error) {
+	return s.Server.Listen("tcp", address)
 }
 
 func (s *tsnetOverlay) Status(ctx context.Context) (*ipnstate.Status, error) {
@@ -215,17 +249,63 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 	loginError := false
 	failures := make(chan error, len(info.Listeners))
 	var servers []serving
+	// The discovery redirect is optional: it opens after the Silo listeners,
+	// its failures never stop them, and a failed one is retried while the node
+	// stays connected.
+	var redirect *serving
+	var redirectRetryAt time.Time
+	redirectFailed := false
+	redirectFailures := make(chan error, 1)
+	closeRedirect := func() {
+		if redirect != nil {
+			redirect.close()
+			redirect = nil
+		}
+	}
 	// Sign-in reads the node only while it is serving, so closing the
 	// listeners withdraws it, including on a rename whose new certificate is
-	// not issued yet.
+	// not issued yet. The redirect goes with them and reopens with the new
+	// origin.
 	closeServers := func() {
 		identity(nil)
 		for _, s := range servers {
 			s.close()
 		}
 		servers = nil
+		closeRedirect()
+		redirectRetryAt = time.Time{}
 	}
 	defer closeServers()
+	discoveryFailed := func(reason string) {
+		closeRedirect()
+		redirectRetryAt = time.Now().Add(discoveryRetryDelay)
+		if !redirectFailed {
+			slog.Warn("tailnet discovery redirect unavailable; retrying", "reason", reason)
+			redirectFailed = true
+		}
+	}
+	openRedirect := func(origin string) {
+		if redirect != nil || !offersDiscoveryRedirect(config, info) || time.Now().Before(redirectRetryAt) {
+			return
+		}
+		handler, err := discoveryRedirect(origin)
+		if err != nil {
+			discoveryFailed("invalid origin")
+			return
+		}
+		ln, err := srv.Listen(ctx, fmt.Sprintf(":%d", discoveryRedirectPort))
+		if err != nil {
+			discoveryFailed("cannot listen on port 80")
+			return
+		}
+		select { // drop a failure left by the redirect this one replaces
+		case <-redirectFailures:
+		default:
+		}
+		served := serveHandler(ctx, ln, nil, handler, redirectFailures)
+		redirect = &served
+		redirectFailed = false
+	}
 	lastHostname := ""
 	var retryTimer *time.Timer
 	var retryWake <-chan time.Time
@@ -304,6 +384,7 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 				}
 				lastHostname = s.Hostname
 			}
+			openRedirect(s.Origin)
 			identity(srv)
 			publish(s)
 		}
@@ -318,6 +399,11 @@ func runOverlay(ctx context.Context, host Host, config Config, publish func(*plu
 				return ctx.Err()
 			}
 			return &PublicError{"overlay listener stopped; reconnect to retry"}
+		case <-redirectFailures:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			discoveryFailed("redirect server stopped")
 		case notification := <-changes:
 			if notification.ErrMessage != nil {
 				loginError = true

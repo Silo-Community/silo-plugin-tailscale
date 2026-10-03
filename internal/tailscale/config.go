@@ -21,6 +21,9 @@ type Config struct {
 	// from signing in, for tailnets whose routers rewrite forwarded LAN
 	// traffic to their own Tailscale address.
 	RefuseSubnetRouters bool
+	// Discovery answers plain HTTP on the API node's port 80 with a redirect
+	// to its HTTPS origin, so apps can find the server by its bare name.
+	Discovery bool
 }
 
 // Sign-in access modes. Anyone whose untagged device reaches Silo can sign in
@@ -33,7 +36,7 @@ const (
 var prefixPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
 
 func ParseConfig(entries []*pluginv1.ConfigEntry) (Config, error) {
-	c := Config{HostnamePrefix: "silo", SignInAccess: SignInAnyone}
+	c := Config{HostnamePrefix: "silo", SignInAccess: SignInAnyone, Discovery: true}
 	seen := false
 	for _, entry := range entries {
 		if entry.GetKey() != "tailscale" || seen {
@@ -91,6 +94,14 @@ func ParseConfig(entries []*pluginv1.ConfigEntry) (Config, error) {
 					c.RefuseSubnetRouters = true
 				default:
 					return c, fmt.Errorf("subnet routers must be allow or refuse")
+				}
+			case "discovery":
+				switch value.GetStringValue() {
+				case "", "on":
+				case "off":
+					c.Discovery = false
+				default:
+					return c, fmt.Errorf("discovery must be on or off")
 				}
 			default:
 				return c, fmt.Errorf("unexpected configuration field")

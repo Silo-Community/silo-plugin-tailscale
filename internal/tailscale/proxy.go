@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -137,12 +138,20 @@ type serving struct {
 
 func serve(ctx context.Context, listener net.Listener, tlsConfig *tls.Config, address, token string, failures chan<- error) serving {
 	proxy, transport := NewProxy(address, token)
+	s := serveHandler(ctx, listener, tlsConfig, proxy, failures)
+	s.transport = transport
+	return s
+}
+
+// serveHandler serves handler on listener until close. A nil failures
+// channel makes the server's failure invisible to the connection lifecycle.
+func serveHandler(ctx context.Context, listener net.Listener, tlsConfig *tls.Config, handler http.Handler, failures chan<- error) serving {
 	connections := &connections{all: make(map[net.Conn]struct{})}
 	listener = trackedListener{listener, connections}
 	if tlsConfig != nil {
 		listener = tls.NewListener(listener, tlsConfig)
 	}
-	server := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
 		ErrorLog:    log.New(io.Discard, "", 0),
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	done := make(chan struct{})
@@ -156,7 +165,7 @@ func serve(ctx context.Context, listener net.Listener, tlsConfig *tls.Config, ad
 			}
 		}
 	}()
-	return serving{server: server, transport: transport, connections: connections, done: done}
+	return serving{server: server, connections: connections, done: done}
 }
 func (s serving) close() {
 	_ = s.server.Close()
@@ -164,5 +173,35 @@ func (s serving) close() {
 	// deferred listener close before allowing this port to be opened again.
 	<-s.done
 	s.connections.close()
-	s.transport.CloseIdleConnections()
+	if s.transport != nil {
+		s.transport.CloseIdleConnections()
+	}
+}
+
+// discoveryRedirect answers plain HTTP on the overlay with a redirect to the
+// API's HTTPS origin, keeping the path and query. A client that knows only
+// the short MagicDNS name ("http://silo/") cannot use HTTPS at that name,
+// because the certificate covers the full tailnet name; the redirect hands it
+// that name. It never proxies, so no request reaches Silo without TLS. The
+// redirect is temporary because the node can be renamed.
+//
+// The target is the parsed origin with only the request's path and query
+// copied in, never a string built from the request line: an absolute-form
+// request such as "GET http:@evil.example" would otherwise turn the origin
+// into userinfo and redirect to another host.
+func discoveryRedirect(origin string) (http.Handler, error) {
+	base, err := url.Parse(origin)
+	if err != nil || base.Scheme != "https" || base.Host == "" {
+		return nil, fmt.Errorf("discovery redirect needs an https origin")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "use HTTPS", http.StatusMethodNotAllowed)
+			return
+		}
+		target := *base
+		target.Path, target.RawPath, target.RawQuery = r.URL.Path, r.URL.RawPath, r.URL.RawQuery
+		http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+	}), nil
 }
