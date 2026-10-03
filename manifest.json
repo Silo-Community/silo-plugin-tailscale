@@ -1,6 +1,6 @@
 {
   "plugin_id": "ironicbadger.network-access.tailscale",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "presentation": {
