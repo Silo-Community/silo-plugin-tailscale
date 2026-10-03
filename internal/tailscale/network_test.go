@@ -531,53 +531,139 @@ func TestOverlayWithdrawsIdentityWhileRenamedNodeHasNoCertificate(t *testing.T) 
 	}
 }
 
-func TestOverlayRedirectsPlainHTTPToTheAPIOrigin(t *testing.T) {
-	node := newFakeOverlay()
-	node.current = runningStatus("silo.example.test")
-	run := startFakeOverlay(t, node, true)
-	run.state(t, "connected")
-	node.mu.Lock()
-	redirect := node.plain[":80"]
-	ports := strings.Join(node.ports, ",")
-	node.mu.Unlock()
-	if redirect == nil || ports != ":443,:8096,:13378" {
-		t.Fatalf("redirect listener %v, TLS ports %s", redirect, ports)
+// redirectClient does not follow redirects, gives up quickly, and does not
+// leave connections in the shared transport's pool.
+func redirectClient(t *testing.T) *http.Client {
+	t.Helper()
+	transport := &http.Transport{}
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{
+		Transport:     transport,
+		Timeout:       5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Get("http://" + redirect.Addr().String() + "/api/v2/system/identity?x=1")
+}
+
+func discoveryListener(t *testing.T, node *fakeOverlay) net.Listener {
+	t.Helper()
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	return node.plain[":80"]
+}
+
+func redirectLocation(t *testing.T, listener net.Listener, path string) string {
+	t.Helper()
+	response, err := redirectClient(t).Get("http://" + listener.Addr().String() + path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusTemporaryRedirect ||
-		response.Header.Get("Location") != "https://silo.example.test/api/v2/system/identity?x=1" {
-		t.Fatalf("redirect = %d %q", response.StatusCode, response.Header.Get("Location"))
+	if response.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want 307", response.StatusCode)
+	}
+	return response.Header.Get("Location")
+}
+
+func TestOverlayRedirectsPlainHTTPToTheAPIOrigin(t *testing.T) {
+	node := newFakeOverlay()
+	node.current = runningStatus("silo.example.test")
+	run := startConfiguredOverlay(t, node, true, Config{Discovery: true})
+	run.state(t, "connected")
+	node.mu.Lock()
+	ports := strings.Join(node.ports, ",")
+	node.mu.Unlock()
+	if ports != ":443,:8096,:13378" {
+		t.Fatalf("TLS ports %s", ports)
+	}
+	redirect := discoveryListener(t, node)
+	if redirect == nil {
+		t.Fatal("no discovery listener on :80")
+	}
+	if got := redirectLocation(t, redirect, "/api/v2/system/identity?x=1"); got != "https://silo.example.test/api/v2/system/identity?x=1" {
+		t.Fatalf("Location = %q", got)
 	}
 }
 
-func TestOverlayServesWithoutTheRedirectWhenPort80Fails(t *testing.T) {
+func TestOverlayDiscoveryListenerFollowsTheNode(t *testing.T) {
+	node := newFakeOverlay()
+	node.current = runningStatus("silo.example.test")
+	run := startConfiguredOverlay(t, node, false, Config{Discovery: true})
+	run.state(t, "connected")
+	first := discoveryListener(t, node)
+
+	node.changeStatus(&ipnstate.Status{BackendState: "Starting"})
+	run.state(t, "connecting")
+	if _, err := first.Accept(); err == nil {
+		t.Fatal("discovery listener survived backend loss")
+	}
+
+	node.changeStatus(runningStatus("renamed.example.test"))
+	if s := run.state(t, "connected"); s.Hostname != "renamed.example.test" {
+		t.Fatal(s)
+	}
+	renamed := discoveryListener(t, node)
+	if renamed == nil || renamed == first {
+		t.Fatal("discovery listener was not reopened")
+	}
+	if got := redirectLocation(t, renamed, "/"); got != "https://renamed.example.test/" {
+		t.Fatalf("Location after rename = %q", got)
+	}
+}
+
+func TestOverlayRetriesTheDiscoveryListenerAndServesMeanwhile(t *testing.T) {
+	previous := discoveryRetryDelay
+	discoveryRetryDelay = 0
+	t.Cleanup(func() { discoveryRetryDelay = previous })
 	node := newFakeOverlay()
 	node.current = runningStatus("silo.example.test")
 	node.failPlain = true
-	run := startFakeOverlay(t, node, false)
+	run := startConfiguredOverlay(t, node, false, Config{Discovery: true})
 	if s := run.state(t, "connected"); s.Origin != "https://silo.example.test" {
 		t.Fatal(s)
+	}
+	node.mu.Lock()
+	attempted := strings.Join(node.plainPorts, ",")
+	node.failPlain = false
+	node.mu.Unlock()
+	if attempted != ":80" {
+		t.Fatalf("discovery listen attempts = %q, want :80", attempted)
+	}
+	// Any later pass of the loop opens it again.
+	node.changeStatus(runningStatus("silo.example.test"))
+	run.state(t, "connected")
+	if discoveryListener(t, node) == nil {
+		t.Fatal("discovery listener was not retried")
+	}
+}
+
+func TestOverlayDiscoveryOffKeepsPort80Closed(t *testing.T) {
+	node := newFakeOverlay()
+	node.current = runningStatus("silo.example.test")
+	run := startConfiguredOverlay(t, node, false, Config{Discovery: false})
+	run.state(t, "connected")
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if len(node.plainPorts) != 0 {
+		t.Fatalf("discovery off still listened on %v", node.plainPorts)
 	}
 }
 
 func TestOffersDiscoveryRedirect(t *testing.T) {
 	api := runtimehost.HostListener{Name: "api", Address: "127.0.0.1:8080", DefaultPort: 443}
+	on, off := Config{Discovery: true}, Config{}
 	for _, tc := range []struct {
-		name string
-		info *runtimehost.HostInfo
-		want bool
+		name   string
+		config Config
+		info   *runtimehost.HostInfo
+		want   bool
 	}{
-		{"api host", &runtimehost.HostInfo{HostRole: "api", Listeners: []runtimehost.HostListener{api}}, true},
-		{"proxy host", &runtimehost.HostInfo{HostRole: "proxy", NodeID: 1, Listeners: []runtimehost.HostListener{api}}, false},
-		{"listener on 80", &runtimehost.HostInfo{HostRole: "api", Listeners: []runtimehost.HostListener{
+		{"api host", on, &runtimehost.HostInfo{HostRole: "api", Listeners: []runtimehost.HostListener{api}}, true},
+		{"discovery off", off, &runtimehost.HostInfo{HostRole: "api", Listeners: []runtimehost.HostListener{api}}, false},
+		{"proxy host", on, &runtimehost.HostInfo{HostRole: "proxy", NodeID: 1, Listeners: []runtimehost.HostListener{api}}, false},
+		{"listener on 80", on, &runtimehost.HostInfo{HostRole: "api", Listeners: []runtimehost.HostListener{
 			{Name: "api", Address: "127.0.0.1:8080", DefaultPort: 80}}}, false},
 	} {
-		if got := offersDiscoveryRedirect(tc.info); got != tc.want {
+		if got := offersDiscoveryRedirect(tc.config, tc.info); got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}

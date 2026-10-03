@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -178,18 +179,29 @@ func (s serving) close() {
 }
 
 // discoveryRedirect answers plain HTTP on the overlay with a redirect to the
-// API's HTTPS origin. A client that knows only the short MagicDNS name
-// ("http://silo/") cannot use HTTPS at that name, because the certificate
-// covers the full tailnet name; the redirect hands it that name. It never
-// proxies, so no request reaches Silo without TLS. The redirect is temporary
-// because the node can be renamed.
-func discoveryRedirect(origin string) http.Handler {
+// API's HTTPS origin, keeping the path and query. A client that knows only
+// the short MagicDNS name ("http://silo/") cannot use HTTPS at that name,
+// because the certificate covers the full tailnet name; the redirect hands it
+// that name. It never proxies, so no request reaches Silo without TLS. The
+// redirect is temporary because the node can be renamed.
+//
+// The target is the parsed origin with only the request's path and query
+// copied in, never a string built from the request line: an absolute-form
+// request such as "GET http:@evil.example" would otherwise turn the origin
+// into userinfo and redirect to another host.
+func discoveryRedirect(origin string) (http.Handler, error) {
+	base, err := url.Parse(origin)
+	if err != nil || base.Scheme != "https" || base.Host == "" {
+		return nil, fmt.Errorf("discovery redirect needs an https origin")
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "use HTTPS", http.StatusMethodNotAllowed)
 			return
 		}
-		http.Redirect(w, r, origin+r.URL.RequestURI(), http.StatusTemporaryRedirect)
-	})
+		target := *base
+		target.Path, target.RawPath, target.RawQuery = r.URL.Path, r.URL.RawPath, r.URL.RawQuery
+		http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+	}), nil
 }

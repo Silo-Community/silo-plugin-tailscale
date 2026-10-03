@@ -130,3 +130,23 @@ func TestSubnetRouters(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscovery(t *testing.T) {
+	defaults, err := ParseConfig(nil)
+	if err != nil || !defaults.Discovery {
+		t.Fatalf("default discovery = %v, %v", defaults.Discovery, err)
+	}
+	for value, want := range map[string]*bool{"": new(true), "on": new(true), "off": new(false), "yes": nil} {
+		v, _ := structpb.NewStruct(map[string]any{"discovery": value})
+		c, err := ParseConfig([]*pluginv1.ConfigEntry{{Key: "tailscale", Value: v}})
+		if want == nil {
+			if err == nil {
+				t.Fatalf("discovery %q accepted", value)
+			}
+			continue
+		}
+		if err != nil || c.Discovery != *want {
+			t.Fatalf("discovery %q = %v, %v", value, c.Discovery, err)
+		}
+	}
+}

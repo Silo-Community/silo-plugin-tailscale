@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"runtime"
 	"slices"
 	"strings"
@@ -308,10 +309,43 @@ func TestProxyFlushesEvents(t *testing.T) {
 	}
 }
 
-func TestDiscoveryRedirectRefusesWrites(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	discoveryRedirect("https://silo.example.test").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v2/auth/login", nil))
-	if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Location") != "" {
-		t.Fatalf("POST answered %d with Location %q", recorder.Code, recorder.Header().Get("Location"))
+func TestDiscoveryRedirect(t *testing.T) {
+	handler, err := discoveryRedirect("https://silo.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locationFor := func(method, requestURI string) (int, string) {
+		t.Helper()
+		request := httptest.NewRequest(method, "/", nil)
+		parsed, err := url.ParseRequestURI(requestURI)
+		if err != nil {
+			t.Fatalf("parse %q: %v", requestURI, err)
+		}
+		request.URL, request.RequestURI = parsed, requestURI
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder.Code, recorder.Header().Get("Location")
+	}
+	for _, tc := range []struct{ method, requestURI, want string }{
+		{http.MethodGet, "/api/v2/system/identity?x=1", "https://silo.example.test/api/v2/system/identity?x=1"},
+		{http.MethodHead, "/", "https://silo.example.test/"},
+		// Absolute-form and asterisk request lines must not move the host.
+		{http.MethodGet, "http:@evil.example", "https://silo.example.test"},
+		{http.MethodGet, "http://evil.example/path?q=1", "https://silo.example.test/path?q=1"},
+		{http.MethodGet, "*", "https://silo.example.test/*"},
+	} {
+		code, location := locationFor(tc.method, tc.requestURI)
+		if code != http.StatusTemporaryRedirect || location != tc.want {
+			t.Errorf("%s %s = %d %q, want 307 %q", tc.method, tc.requestURI, code, location, tc.want)
+		}
+		if target, err := url.Parse(location); err != nil || target.Host != "silo.example.test" || target.User != nil {
+			t.Errorf("%s %s redirected to host %q", tc.method, tc.requestURI, location)
+		}
+	}
+	if code, location := locationFor(http.MethodPost, "/api/v2/auth/login"); code != http.StatusMethodNotAllowed || location != "" {
+		t.Fatalf("POST answered %d with Location %q", code, location)
+	}
+	if _, err := discoveryRedirect("http://silo"); err == nil {
+		t.Fatal("expected an error for a non-https origin")
 	}
 }

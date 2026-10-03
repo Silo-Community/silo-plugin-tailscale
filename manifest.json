@@ -6,7 +6,7 @@
   "presentation": {
     "display_name": "Tailscale",
     "summary": "Reach Silo through your tailnet without opening public ports.",
-    "description_markdown": "Runs a separate Tailscale node on the API host and every proxy. Exposes the native, Jellyfin and Audiobookshelf listeners over HTTPS on your tailnet only. Optionally, people whose device reaches Silo over Tailscale sign in as the device's owner with no password; your tailnet policy decides who can and with which role.",
+    "description_markdown": "Runs a separate Tailscale node on the API host and every proxy. Exposes the native, Jellyfin and Audiobookshelf listeners over HTTPS on your tailnet only. The API host also answers plain HTTP on port 80 with a redirect to its HTTPS address, so Silo apps can find it by name; turn this off under Discovery. Optionally, people whose device reaches Silo over Tailscale sign in as the device's owner with no password; your tailnet policy decides who can and with which role.",
     "setup_markdown": "Requires Silo's network-access plugin support, one API host, and MagicDNS plus HTTPS certificates enabled in Tailscale. Save an optional reusable auth key for automatic enrollment across proxies, then select Connect in Settings > Network Access. Otherwise use the authorization URL shown for each host. To let people sign in with their Tailscale identity, turn on Tailscale under Settings > Sign-in > Network sign-in.",
     "homepage_url": "https://github.com/Silo-Community/silo-plugin-tailscale",
     "source_url": "https://github.com/Silo-Community/silo-plugin-tailscale",
@@ -58,7 +58,7 @@
       "key": "tailscale",
       "title": "Tailscale",
       "description": "Enrollment settings shared by all hosts. Each host retains its own node identity.",
-      "json_schema": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"hostname_prefix\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$\",\"default\":\"silo\"},\"auth_key\":{\"type\":\"string\",\"writeOnly\":true},\"tags\":{\"type\":\"string\",\"default\":\"\"},\"funnel\":{\"type\":\"boolean\",\"default\":false,\"deprecated\":true,\"description\":\"Removed; ignored.\"},\"sign_in_access\":{\"type\":\"string\",\"enum\":[\"anyone\",\"policy\"],\"default\":\"anyone\"},\"subnet_routers\":{\"type\":\"string\",\"enum\":[\"allow\",\"refuse\"],\"default\":\"allow\"}}}",
+      "json_schema": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"hostname_prefix\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$\",\"default\":\"silo\"},\"auth_key\":{\"type\":\"string\",\"writeOnly\":true},\"tags\":{\"type\":\"string\",\"default\":\"\"},\"funnel\":{\"type\":\"boolean\",\"default\":false,\"deprecated\":true,\"description\":\"Removed; ignored.\"},\"sign_in_access\":{\"type\":\"string\",\"enum\":[\"anyone\",\"policy\"],\"default\":\"anyone\"},\"subnet_routers\":{\"type\":\"string\",\"enum\":[\"allow\",\"refuse\"],\"default\":\"allow\"},\"discovery\":{\"type\":\"string\",\"enum\":[\"on\",\"off\"],\"default\":\"on\"}}}",
       "admin_form": {
         "fields": [
           {
@@ -118,6 +118,25 @@
               }
             ],
             "description": "Whether devices that route a subnet into the tailnet can sign in with their Tailscale identity. Exit nodes are not affected."
+          },
+          {
+            "key": "discovery",
+            "label": "Discovery",
+            "control": "ADMIN_FORM_CONTROL_SELECT",
+            "default_value": "on",
+            "options": [
+              {
+                "value": "on",
+                "label": "On",
+                "description": "The API host also answers plain HTTP on port 80 with a redirect to its HTTPS address, so Silo apps on the tailnet can find it by its short name. Nothing else is served on port 80."
+              },
+              {
+                "value": "off",
+                "label": "Off",
+                "description": "Port 80 stays closed. People enter the full HTTPS address."
+              }
+            ],
+            "description": "Whether Silo apps on the tailnet can find this server by its short hostname."
           }
         ]
       }
