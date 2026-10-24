@@ -3,6 +3,7 @@ package tailscale
 import (
 	"context"
 	"errors"
+	"runtime/debug"
 	"sync"
 	"testing"
 	"time"
@@ -455,5 +456,19 @@ func TestStoreRoundTripAndIsolation(t *testing.T) {
 	}
 	if got, err := a.ReadState("empty"); err != nil || len(got) != 0 {
 		t.Fatal("empty value confused with missing")
+	}
+}
+
+func TestTsnetVersionReadsLinkedModule(t *testing.T) {
+	// The adapted build replaces tailscale.com but keeps the go.mod version.
+	info := &debug.BuildInfo{Deps: []*debug.Module{
+		{Path: "tailscale.com/other", Version: "v9.9.9"},
+		{Path: "tailscale.com", Version: "v1.102.4", Replace: &debug.Module{Path: "./.build/tailscale", Version: "(devel)"}},
+	}}
+	if got := tsnetVersion(info, true); got != "tsnet 1.102.4" {
+		t.Fatalf("tsnetVersion = %q, want %q", got, "tsnet 1.102.4")
+	}
+	if got := tsnetVersion(nil, false); got != "tsnet" {
+		t.Fatalf("tsnetVersion without build info = %q, want %q", got, "tsnet")
 	}
 }

@@ -9,12 +9,22 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import subprocess
 import tempfile
 import zipfile
 
-VERSION = "v1.102.4"
+
+def pinned_version(go_mod):
+    """Read the Tailscale version from go.mod, the only place it is pinned."""
+    versions = re.findall(r"^\s*tailscale\.com (v\S+)", go_mod.read_text(encoding="utf-8"), re.MULTILINE)
+    if len(versions) != 1:
+        raise ValueError("go.mod must require tailscale.com exactly once")
+    return versions[0]
+
+
+VERSION = pinned_version(Path(__file__).resolve().parents[1] / "go.mod")
 
 
 def extract_verified_module(archive, output, expected_sum):
@@ -124,7 +134,7 @@ def prepare(root):
     module = json.loads(subprocess.check_output(
         ["go", "mod", "download", "-json", "tailscale.com"], cwd=root, env=environment))
     if module.get("Version") != VERSION or module.get("Replace"):
-        raise ValueError("Review the storage adaptations before changing Tailscale")
+        raise ValueError("Downloaded Tailscale module does not match go.mod")
     if module.get("Sum") != sums[0]:
         raise ValueError("Tailscale download checksum does not match committed go.sum")
     build = root / ".build"
