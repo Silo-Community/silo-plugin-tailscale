@@ -120,7 +120,8 @@ for the old node and its status reporter to finish.
 
 ## Tailscale storage adaptations
 
-Tailscale is pinned to **v1.102.4**. Its public `Store` field does not fully satisfy
+Tailscale is pinned only in `go.mod`, and Dependabot opens a PR for each new
+release. Its public `Store` field does not fully satisfy
 Silo's no-files contract: tsnet creates logtail files, and ACME uses a certificate
 directory for custom stores outside Kubernetes.
 

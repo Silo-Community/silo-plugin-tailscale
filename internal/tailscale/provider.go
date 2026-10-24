@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,8 +18,22 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const ProviderVersion = "tsnet 1.102.4"
+// ProviderVersion reports the tsnet version linked into this build, so go.mod
+// stays the only place Tailscale is pinned.
+var ProviderVersion = tsnetVersion(debug.ReadBuildInfo())
+
 const desiredKey = "desired_connected"
+
+func tsnetVersion(info *debug.BuildInfo, ok bool) string {
+	if ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "tailscale.com" {
+				return "tsnet " + strings.TrimPrefix(dep.Version, "v")
+			}
+		}
+	}
+	return "tsnet"
+}
 
 type Host interface {
 	GetHostInfo(context.Context) (*runtimehost.HostInfo, error)
