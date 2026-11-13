@@ -6,7 +6,7 @@ Access Silo over HTTPS through your Tailscale network. No separate Tailscale dae
 
 Requires a Silo server with network-access plugin support, with MagicDNS and HTTPS certificates enabled in Tailscale.
 
-1. Install **Tailscale** from the plugin catalog in Silo (enable **Include approved community plugins** in plugin settings). To install manually instead, [build the plugin](docs/DEVELOPMENT.md#build-and-verify), extract the ZIP, and upload its `plugin` executable.
+1. Install **Tailscale** from the plugin catalog in Silo (enable **Include approved community plugins** in plugin settings). To install manually instead, download `plugin-<os>-<arch>` from a [release](https://github.com/Silo-Community/silo-plugin-tailscale/releases) and [verify its signature](docs/DEVELOPMENT.md#releases), or [build the plugin](docs/DEVELOPMENT.md#build-and-verify) and extract the ZIP, then upload the `plugin` executable.
 2. Enable the plugin, choose a hostname, and optionally enter a Tailscale auth key.
 3. Save, then select **Connect** in **Settings > Network Access**. Sign in if prompted.
 4. Open the reported HTTPS URL from a device running Tailscale. Silo apps with server discovery find a server whose hostname is `silo` on their own; for another hostname, type just that name. Check the hostname in the reported URL: if an older `silo` machine is still in your tailnet (for example after a reinstall), the new node is named `silo-1`, and apps probing `silo` reach the old one. Remove the stale machine in the Tailscale admin console. Turn **Discovery** off to keep port 80 closed.

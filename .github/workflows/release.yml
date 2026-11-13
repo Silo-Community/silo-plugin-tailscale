@@ -1,88 +1,254 @@
+# Builds, signs, and publishes a release from a pushed tag vX.Y.Z that matches
+# manifest.json "version".
+#
+# The signature is a GitHub artifact attestation (Sigstore keyless). Its
+# certificate records this workflow at the tag, which is the identity Silo
+# servers and the approved community catalog check, so releases run only from a
+# tag push.
+#
+# Artifacts are not trusted between jobs: any job in the run can replace an
+# artifact by name. The checksums and the Sigstore bundle travel as job
+# outputs, the signing job attests those checksums without downloading or
+# running anything from the repository, and the release job checks the
+# downloaded files against the same checksums before publishing.
 name: Release
 
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  release:
+  build:
+    name: Build release assets
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      checksums: ${{ steps.assets.outputs.checksums }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
+      # No module or build cache: a signed release must not consume cache
+      # entries that other workflow runs in the repository could have written.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+          cache: false
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
 
-      - name: Determine version
+      - name: Check the tag against manifest.json
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            tag="${GITHUB_REF_NAME}"
-          else
-            latest=$(git tag -l 'v*' --sort=-v:refname | head -n1)
-            if [ -z "$latest" ]; then
-              version=$(jq -r '.version' manifest.json)
-            else
-              base="${latest#v}"
-              IFS='.' read -r major minor patch <<< "$base"
-              version="${major}.${minor}.$((patch + 1))"
-            fi
-            tag="v${version}"
-            git tag "$tag"
-            git push origin "refs/tags/${tag}"
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "push" ] || [[ "$REF" != refs/tags/v* ]]; then
+            echo "::error::Releases run only from a pushed tag vX.Y.Z (got '${EVENT_NAME}' on '${REF}')."
+            exit 1
           fi
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          tag="${REF#refs/tags/}"
+          version="${tag#v}"
+          manifest_version="$(jq -er '.version' manifest.json)"
+          if [ "$manifest_version" != "$version" ]; then
+            echo "::error file=manifest.json::manifest.json version is '${manifest_version}', but the tag is ${tag}."
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Build release archives
-        run: make dist VERSION="${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: make dist VERSION="$VERSION"
 
       - name: Prepare release assets
+        id: assets
         # The Silo plugin catalog and server install raw binaries named
         # plugin-<os>-<arch> and verify them against checksums.txt. Publish
         # those alongside the reproducible ZIP archives from `make dist`.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
           mkdir -p release
           cp dist/*.zip release/
           cp dist/checksums.txt release/checksums.txt
           for platform in linux-amd64 linux-arm64 darwin-arm64; do
-            archive="dist/silo-plugin-tailscale-${version}-${platform}.zip"
+            archive="dist/silo-plugin-tailscale-${VERSION}-${platform}.zip"
             unzip -p "$archive" plugin > "release/plugin-${platform}"
             chmod 0755 "release/plugin-${platform}"
             (cd release && sha256sum "plugin-${platform}" >> checksums.txt)
           done
           cat release/checksums.txt
+          # checksums.txt lists every published file except itself and the
+          # bundle, and is the attestation's subject list. base64 keeps the
+          # multi-line file a single-line job output.
+          echo "checksums=$(base64 -w0 release/checksums.txt)" >> "$GITHUB_OUTPUT"
+          rm release/checksums.txt
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: release/
+          if-no-files-found: error
+          retention-days: 5
+
+  # Holds the signing permission. It checks nothing out, downloads nothing,
+  # and runs no repository code: its subjects are the checksums the build job
+  # returned as an output.
+  attest:
+    name: Sign release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      bundle: ${{ steps.bundle.outputs.bundle }}
+    steps:
+      - name: Write and check the subject list
+        env:
+          CHECKSUMS: ${{ needs.build.outputs.checksums }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          file="${RUNNER_TEMP}/subjects.txt"
+          printf '%s' "$CHECKSUMS" | base64 -d > "$file"
+          if grep -Evx '[0-9a-f]{64}  [A-Za-z0-9._-]+' "$file"; then
+            echo "::error::The build job's checksums have an unexpected line (above)."
+            exit 1
+          fi
+          expected=""
+          for platform in linux-amd64 linux-arm64 darwin-arm64; do
+            expected+="plugin-${platform}"$'\n'"silo-plugin-tailscale-${VERSION}-${platform}.zip"$'\n'
+          done
+          expected="$(printf '%s' "$expected" | sort)"
+          actual="$(awk '{print $2}' "$file" | sort)"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::The build job's checksums do not list exactly the release assets."
+            printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual"
+            exit 1
+          fi
+          cat "$file"
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/subjects.txt
+
+      - name: Return the bundle
+        id: bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          jq -e '.mediaType' "$BUNDLE_PATH" >/dev/null
+          encoded="$(base64 -w0 "$BUNDLE_PATH")"
+          # Job outputs are capped at 1 MB per job, counted as UTF-16.
+          if [ "${#encoded}" -gt 400000 ]; then
+            echo "::error::The Sigstore bundle is too large to return as a job output (${#encoded} base64 characters)."
+            exit 1
+          fi
+          echo "bundle=${encoded}" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish release
+    needs: [build, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: release
+
+      - name: Check assets against the build job's checksums
+        env:
+          CHECKSUMS: ${{ needs.build.outputs.checksums }}
+          BUNDLE: ${{ needs.attest.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$CHECKSUMS" | base64 -d > "${RUNNER_TEMP}/checksums.txt"
+          if grep -Evx '[0-9a-f]{64}  [A-Za-z0-9._-]+' "${RUNNER_TEMP}/checksums.txt"; then
+            echo "::error::The build job's checksums have an unexpected line (above)."
+            exit 1
+          fi
+          expected="$(awk '{print $2}' "${RUNNER_TEMP}/checksums.txt" | sort)"
+          actual="$(find release -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::The downloaded artifact does not hold exactly the expected files."
+            printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual"
+            exit 1
+          fi
+          cp "${RUNNER_TEMP}/checksums.txt" release/checksums.txt
+          (cd release && sha256sum --check --strict checksums.txt)
+          printf '%s' "$BUNDLE" | base64 -d > release/plugin.sigstore.json
+          jq -e '.mediaType' release/plugin.sigstore.json >/dev/null
+
+      # Checks the bundle the way Silo servers and the approved community
+      # catalog do, pinned to this workflow at the tag, so a release they
+      # would refuse is never published.
+      - name: Verify the bundle against this workflow's identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          signer="https://github.com/Silo-Community/silo-plugin-tailscale/.github/workflows/release.yml@refs/tags/${TAG}"
+          for asset in $(awk '{print $2}' release/checksums.txt); do
+            gh attestation verify "release/${asset}" \
+              --bundle release/plugin.sigstore.json \
+              --repo Silo-Community/silo-plugin-tailscale \
+              --cert-identity "$signer" \
+              --cert-oidc-issuer https://token.actions.githubusercontent.com \
+              --source-ref "refs/tags/${TAG}" \
+              --deny-self-hosted-runners
+          done
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.build.outputs.tag }}
           files: |
             release/plugin-linux-amd64
             release/plugin-linux-arm64
             release/plugin-darwin-arm64
             release/*.zip
             release/checksums.txt
+            release/plugin.sigstore.json
           generate_release_notes: true
 
-      - name: Notify approved community catalog
+  # Separate from release so a failed dispatch can be re-run on its own.
+  dispatch:
+    name: Notify approved community catalog
+    needs: [build, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Send plugin_release_published
         env:
           DISPATCH_TOKEN: ${{ secrets.SILO_PLUGINS_DISPATCH_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
         run: |
           if [ -z "$DISPATCH_TOKEN" ]; then
             echo "::warning::SILO_PLUGINS_DISPATCH_TOKEN is not set; catalog was not notified."
@@ -94,4 +260,4 @@ jobs:
             -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             https://api.github.com/repos/Silo-Community/silo-plugins/dispatches \
-            -d "$(printf '{"event_type":"plugin_release_published","client_payload":{"repo":"Silo-Community/silo-plugin-tailscale","tag":"%s"}}' "${{ steps.version.outputs.tag }}")"
+            -d "$(printf '{"event_type":"plugin_release_published","client_payload":{"repo":"Silo-Community/silo-plugin-tailscale","tag":"%s"}}' "$TAG")"
