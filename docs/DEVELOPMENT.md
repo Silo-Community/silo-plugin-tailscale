@@ -9,7 +9,7 @@ The server PR is still a prerequisite until merged and released.
 
 ## Build and verify
 
-Requires Go 1.26.7 or later, Python 3.9 or later, and Make. CI uses Go 1.26.7
+Requires Go 1.27.4 or later, Python 3.9 or later, and Make. CI uses Go 1.27.4
 and Python 3.13. Run from this repository:
 
 ```sh
