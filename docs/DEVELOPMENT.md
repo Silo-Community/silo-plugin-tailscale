@@ -167,6 +167,32 @@ Real-tailnet/server playback QA has not been performed by the automated tests.
 No Apple or Android API changes are needed: clients install Tailscale separately
 and use the provider's reported server URL.
 
+## Releases
+
+Releases run only from a pushed tag. Bump `version` in `manifest.json` and the
+`VERSION` default in the Makefile, merge that to `main`, then tag the merged
+commit `vX.Y.Z` with the same version and push the tag. The release workflow
+refuses a tag that does not equal `manifest.json` `version`, or whose commit
+is not on `main`.
+
+The workflow builds with `make dist`, then signs the raw binaries
+`plugin-<os>-<arch>` and the ZIP archives with a GitHub artifact attestation.
+Signing runs in a separate job that holds the signing token and runs no
+repository code. The release carries the Sigstore bundle as
+`plugin.sigstore.json` beside the binaries, archives, and `checksums.txt`, and is
+published only after every file verifies against that bundle. Silo servers check
+the signature before installing when the approved community catalog lists the
+bundle.
+
+To verify a download yourself:
+
+```sh
+gh attestation verify plugin-linux-amd64 --repo Silo-Community/silo-plugin-tailscale --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+```
+
+Add `--bundle plugin.sigstore.json` to verify against the bundle from the release
+instead of the copy GitHub stores.
+
 ## HTTPS and tags
 
 The plugin automatically serves Silo over HTTPS using an embedded `tsnet` node. It does not require or configure a separate host `tailscaled` process or `tailscale serve` command. Enable MagicDNS and HTTPS certificates in the tailnet before connecting. A node can join the tailnet before its HTTPS certificate is ready. The plugin reports that distinction and retries certificate issuance with backoff from 15 seconds to five minutes, honoring a longer certificate-authority retry delay. It advertises a usable HTTPS origin only after certificate acquisition and listener setup succeed.
