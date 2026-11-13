@@ -34,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       # No module or build cache: a signed release must not consume cache
@@ -63,6 +64,17 @@ jobs:
           manifest_version="$(jq -er '.version' manifest.json)"
           if [ "$manifest_version" != "$version" ]; then
             echo "::error file=manifest.json::manifest.json version is '${manifest_version}', but the tag is ${tag}."
+            exit 1
+          fi
+          # The approved community catalog lists a release signed by this
+          # workflow only when its commit is on the default branch, so a tag
+          # on an unmerged branch is refused here, before anything is built.
+          git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null || {
+            echo "::error::origin/main was not fetched."
+            exit 1
+          }
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::Tag ${tag} (${GITHUB_SHA}) is not on main. Merge the release commit first, then tag it."
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
