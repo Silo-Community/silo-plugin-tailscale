@@ -41,8 +41,8 @@ def notices(root, environment):
     license_path = Path(toolchain["GOROOT"]) / "LICENSE"
     if not license_path.is_file():
         # Nix omits GOROOT/LICENSE. Keep this official fallback pinned to the
-        # reviewed toolchain: https://github.com/golang/go/blob/go1.26.7/LICENSE
-        if toolchain["GOVERSION"] != "go1.26.7":
+        # reviewed toolchain: https://github.com/golang/go/blob/go1.27.4/LICENSE
+        if toolchain["GOVERSION"] != "go1.27.4":
             raise ValueError("Go toolchain has no LICENSE; update the bundled license for this version")
         license_path = root / "scripts" / "GO_LICENSE.txt"
     go_license = license_path.read_text(encoding="utf-8")
