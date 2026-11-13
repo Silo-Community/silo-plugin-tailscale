@@ -172,7 +172,8 @@ and use the provider's reported server URL.
 Releases run only from a pushed tag. Bump `version` in `manifest.json` and the
 `VERSION` default in the Makefile, merge that to `main`, then tag the merged
 commit `vX.Y.Z` with the same version and push the tag. The release workflow
-refuses a tag that does not equal `manifest.json` `version`.
+refuses a tag that does not equal `manifest.json` `version`, or whose commit
+is not on `main`.
 
 The workflow builds with `make dist`, then signs the raw binaries
 `plugin-<os>-<arch>` and the ZIP archives with a GitHub artifact attestation.
