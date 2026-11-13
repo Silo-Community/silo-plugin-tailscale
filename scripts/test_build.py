@@ -85,7 +85,7 @@ class DistributionTests(unittest.TestCase):
             root = Path(temporary)
             (root / "scripts").mkdir()
             (root / "scripts/GO_LICENSE.txt").write_text("Go copyright and license")
-            toolchain = {"GOROOT": str(root / "toolchain"), "GOVERSION": "go1.26.7"}
+            toolchain = {"GOROOT": str(root / "toolchain"), "GOVERSION": "go1.27.4"}
             with mock.patch.object(dist.subprocess, "check_output", side_effect=["", json.dumps(toolchain)]):
                 self.assertIn("Go copyright and license", dist.notices(root, {}))
             toolchain["GOVERSION"] = "go1.99.0"
