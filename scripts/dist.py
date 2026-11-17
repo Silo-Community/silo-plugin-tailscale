@@ -13,7 +13,8 @@ import sys
 import tempfile
 import zipfile
 
-PLATFORMS = (("linux", "amd64"), ("linux", "arm64"), ("darwin", "arm64"))
+PLATFORMS = (("linux", "amd64"), ("linux", "arm64"), ("darwin", "arm64"),
+             ("freebsd", "amd64"), ("freebsd", "arm64"))
 ARCHIVE_TIME = (1980, 1, 1, 0, 0, 0)
 ARCHIVE_FILES = {"plugin", "manifest.json", "LICENSE", "LICENSE.tailscale", "THIRD_PARTY_NOTICES.txt"}
 
@@ -81,6 +82,12 @@ def verify_binary(data, goos, goarch):
     elif goos == "darwin":
         if len(data) < 8 or data[:4] != b"\xcf\xfa\xed\xfe" or struct.unpack_from("<I", data, 4)[0] != 0x100000C:
             raise ValueError("Binary is not macOS arm64")
+    elif goos == "freebsd":
+        # Byte 7 is the ELF OS/ABI; Go marks FreeBSD executables with 9.
+        machine = {"amd64": 62, "arm64": 183}[goarch]
+        if (len(data) < 20 or data[:6] != b"\x7fELF\x02\x01" or data[7] != 9
+                or struct.unpack_from("<H", data, 18)[0] != machine):
+            raise ValueError(f"Binary is not FreeBSD {goarch}")
     else:
         raise ValueError(f"Unsupported binary platform: {goos}/{goarch}")
 

@@ -20,7 +20,7 @@ make dist VERSION=0.2.0
 ```
 
 `plugin` is the local executable. `dist/` contains Linux amd64, Linux arm64,
-and macOS arm64 archives. Each ZIP archive contains `plugin`, a manifest carrying
+macOS arm64, FreeBSD amd64, and FreeBSD arm64 archives. Each ZIP archive contains `plugin`, a manifest carrying
 the executable's SHA-256 checksum, and licenses. The embedded manifest also
 computes its checksum at runtime. Packaging verifies binary architecture, archive
 permissions, manifests and checksums before replacing `dist/`. A successful build

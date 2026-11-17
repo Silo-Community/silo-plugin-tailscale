@@ -97,7 +97,7 @@ jobs:
           mkdir -p release
           cp dist/*.zip release/
           cp dist/checksums.txt release/checksums.txt
-          for platform in linux-amd64 linux-arm64 darwin-arm64; do
+          for platform in linux-amd64 linux-arm64 darwin-arm64 freebsd-amd64 freebsd-arm64; do
             archive="dist/silo-plugin-tailscale-${VERSION}-${platform}.zip"
             unzip -p "$archive" plugin > "release/plugin-${platform}"
             chmod 0755 "release/plugin-${platform}"
@@ -146,7 +146,7 @@ jobs:
             exit 1
           fi
           expected=""
-          for platform in linux-amd64 linux-arm64 darwin-arm64; do
+          for platform in linux-amd64 linux-arm64 darwin-arm64 freebsd-amd64 freebsd-arm64; do
             expected+="plugin-${platform}"$'\n'"silo-plugin-tailscale-${VERSION}-${platform}.zip"$'\n'
           done
           expected="$(printf '%s' "$expected" | sort)"
@@ -244,6 +244,8 @@ jobs:
             release/plugin-linux-amd64
             release/plugin-linux-arm64
             release/plugin-darwin-arm64
+            release/plugin-freebsd-amd64
+            release/plugin-freebsd-arm64
             release/*.zip
             release/checksums.txt
             release/plugin.sigstore.json
