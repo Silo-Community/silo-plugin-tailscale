@@ -1,5 +1,5 @@
 .PHONY: prepare build test vet check audit dist
-VERSION ?= 0.2.3
+VERSION ?= 0.2.4
 GOFLAGS := "-modfile=$(CURDIR)/.build/go.mod" -mod=readonly -buildvcs=false
 GOWORK := off
 export GOFLAGS GOWORK
